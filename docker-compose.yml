@@ -1,0 +1,90 @@
+name: devagent
+
+# DevAgent MVP stack.
+#   redis     : arq job queue + SSE pub/sub
+#   backend   : FastAPI API (stateless, connects to Supabase PostgreSQL + pgvector)
+#   worker    : arq worker (agents, git, docker sandbox) - holds the docker socket
+#   frontend  : static React build served by nginx, proxies /api to backend
+#
+# Repository code is NEVER executed in these containers. It only ever runs in
+# ephemeral sandbox containers created by the worker (see docs/architecture/sandbox.md).
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: infra/backend.Dockerfile
+      target: runtime
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACES_DIR: /data/workspaces
+      ARTIFACTS_DIR: /data/artifacts
+    volumes:
+      - devagent-data:/data
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/healthz', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/backend.Dockerfile
+      target: runtime
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    user: root
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACES_DIR: /data/workspaces
+      ARTIFACTS_DIR: /data/artifacts
+    volumes:
+      - devagent-data:/data
+      # The docker socket is mounted ONLY here. It is never mounted into the API
+      # container and never into sandbox containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      redis: { condition: service_healthy }
+      backend: { condition: service_healthy }
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  devagent-data:
