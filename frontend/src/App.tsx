@@ -22,22 +22,30 @@ export const AppContent: React.FC = () => {
 
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isNewRepoModalOpen, setIsNewRepoModalOpen] = useState(false);
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
 
   const refreshData = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
+      setLoadError(null);
       const [repos, taskList] = await Promise.all([
-        api.listRepositories().catch(() => []),
-        api.listTasks().catch(() => []),
+        api.listRepositories(),
+        api.listTasks(),
       ]);
       setRepositories(repos);
       setTasks(taskList);
-    } catch (err) {
+    } catch (err: unknown) {
       console.error('Error fetching dashboard data', err);
+      if (err instanceof Error) {
+        setLoadError(`Failed to load data from server: ${err.message}`);
+      } else {
+        setLoadError('An unexpected network error occurred while loading data.');
+      }
     }
   }, [isAuthenticated]);
+
 
   useEffect(() => {
     refreshData();
@@ -98,6 +106,21 @@ export const AppContent: React.FC = () => {
         />
 
         <main style={{ flex: 1, padding: '32px', overflowY: 'auto' }}>
+          {loadError && (
+            <div
+              style={{
+                marginBottom: '20px',
+                padding: '12px 16px',
+                borderRadius: '8px',
+                backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: '#f87171',
+                fontSize: '0.875rem',
+              }}
+            >
+              {loadError}
+            </div>
+          )}
           {selectedTaskId ? (
             <TaskDetailPage
               taskId={selectedTaskId}
@@ -105,6 +128,7 @@ export const AppContent: React.FC = () => {
               onTaskUpdated={refreshData}
             />
           ) : activeTab === 'dashboard' ? (
+
             <DashboardPage
               repositories={repositories}
               tasks={tasks}

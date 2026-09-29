@@ -118,7 +118,7 @@ async def apply_and_test_job(ctx: dict[str, Any], approval_id: str) -> bool:
         session.add(ev2)
         await session.commit()
 
-        # 3. Sandbox Retest
+        # 3. Sandbox Retest with Smart Test Selection
         sandbox = ctx.get("sandbox")
         cleanup_sandbox = False
         if sandbox is None and settings.sandbox_enabled:
@@ -126,21 +126,102 @@ async def apply_and_test_job(ctx: dict[str, Any], approval_id: str) -> bool:
             await sandbox.start()
             cleanup_sandbox = True
 
+        # Determine smart test command:
+        # 1. Custom test command from task.plan if provided by user
+        # 2. Targeted test discovery based on changed files
+        # 3. Fallback to full ["pytest", "-v"]
+        test_cmd = ["pytest", "-v"]
+        user_test_cmd = None
+        if task.plan and isinstance(task.plan, dict):
+            user_test_cmd = task.plan.get("test_command")
+
+        if user_test_cmd:
+            import shlex
+            parsed = shlex.split(user_test_cmd)
+            if parsed and (parsed[0] == "pytest" or parsed[0].endswith("pytest")):
+                test_cmd = parsed
+            else:
+                test_cmd = ["pytest", "-v"]
+        else:
+            changed_paths = [cf.path for cf in (change_files or [])]
+            relevant_tests = []
+            for cp in changed_paths:
+                stem = Path(cp).stem
+                candidates = [
+                    workspace / f"tests/test_{stem}.py",
+                    workspace / f"tests/{stem}_test.py",
+                    workspace / f"test_{stem}.py",
+                ]
+                for cand in candidates:
+                    if cand.is_file():
+                        rel = cand.relative_to(workspace).as_posix()
+                        if rel not in relevant_tests:
+                            relevant_tests.append(rel)
+            if relevant_tests:
+                test_cmd = ["pytest", "-v", *relevant_tests]
+
         try:
             test_service = TestService(session, settings)
-            test_run = await test_service.run_tests(task.id, ["pytest", "-v"], sandbox, phase="verification")
+            test_run = await test_service.run_tests(task.id, test_cmd, sandbox, phase="verification")
 
             cur_seq += 1
             if test_run.all_passed:
                 validate_transition(task.status, TaskStatus.COMPLETED)
                 task.status = TaskStatus.COMPLETED
-                task.summary = f"All {test_run.passed} tests passed. Fix successfully verified in sandbox."
+
+                # Safe local Git operations: stage to task-specific branch without pushing
+                git_branch = f"devagent/task-{str(task.id)[:8]}"
+                git_info = None
+                try:
+                    import subprocess
+                    if (workspace / ".git").is_dir():
+                        subprocess.run(["git", "checkout", "-B", git_branch], cwd=str(workspace), capture_output=True, text=True, check=False)
+                        subprocess.run(["git", "add", "."], cwd=str(workspace), capture_output=True, text=True, check=False)
+                        diff_res = subprocess.run(["git", "diff", "--staged", "--stat"], cwd=str(workspace), capture_output=True, text=True, check=False)
+                        git_info = {
+                            "branch": git_branch,
+                            "status": "commit_ready",
+                            "staged_diff": diff_res.stdout.strip(),
+                            "suggested_commit": f"fix: {task.title}",
+                        }
+                        from app.models.git import GitOperation
+                        from app.models.enums import GitOperationKind, GitOperationStatus
+                        git_op = GitOperation(
+                            repository_id=task.repository_id,
+                            task_id=task.id,
+                            kind=GitOperationKind.BRANCH,
+                            status=GitOperationStatus.SUCCEEDED,
+                            branch=git_branch,
+                            detail=git_info,
+                        )
+                        session.add(git_op)
+                        cur_seq += 1
+                        branch_ev = TaskEvent(
+                            task_id=task.id,
+                            seq=cur_seq,
+                            event_type="git_branch_ready",
+                            level=EventLevel.INFO,
+                            message=f"Changes staged on local branch '{git_branch}'. Ready for commit.",
+                            payload=git_info,
+                        )
+                        session.add(branch_ev)
+                except Exception as g_err:
+                    logger.warning("git_branch_setup_failed", error=str(g_err))
+
+                current_plan = dict(task.plan) if (task.plan and isinstance(task.plan, dict)) else {}
+                if git_info:
+                    current_plan["git"] = git_info
+                task.plan = current_plan
+
+                branch_suffix = f" Branch '{git_branch}' is commit-ready." if git_info else ""
+                task.summary = f"All {test_run.passed} tests passed. Fix successfully verified in sandbox.{branch_suffix}"
                 ev3 = TaskEvent(
                     task_id=task.id,
                     seq=cur_seq,
                     event_type="task_completed",
                     level=EventLevel.INFO,
                     message=f"Task completed successfully: {test_run.summary}",
+                    payload={"git": git_info} if git_info else None,
                 )
                 session.add(ev3)
                 logger.info("apply_and_test_succeeded", task_id=str(task.id), summary=test_run.summary)
@@ -165,6 +246,7 @@ async def apply_and_test_job(ctx: dict[str, Any], approval_id: str) -> bool:
                 logger.warning("apply_and_test_failed", task_id=str(task.id), summary=test_run.summary)
                 await session.commit()
                 return False
+
         finally:
             if cleanup_sandbox and sandbox is not None:
                 await sandbox.destroy()

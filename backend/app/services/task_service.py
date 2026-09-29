@@ -24,6 +24,13 @@ class TaskService:
         self.settings = settings or get_settings()
 
     async def create_task(self, req: TaskCreate, creator: User) -> Task:
+        plan_meta = {}
+        if req.target_files:
+            plan_meta["target_files"] = req.target_files
+        if req.test_command:
+            plan_meta["test_command"] = req.test_command
+
+
         task = Task(
             repository_id=req.repository_id,
             user_id=creator.id,
@@ -33,6 +40,7 @@ class TaskService:
             status=TaskStatus.CREATED,
             base_branch=req.base_branch or "main",
             iteration=1,
+            plan=plan_meta or None,
         )
         self.session.add(task)
         await self.session.commit()
@@ -45,10 +53,16 @@ class TaskService:
             event_type="task_created",
             level=EventLevel.INFO,
             message=f"Task '{task.title}' created by {creator.email}",
-            payload={"type": task.type.value, "base_branch": task.base_branch},
+            payload={
+                "type": task.type.value,
+                "base_branch": task.base_branch,
+                "target_files": req.target_files or [],
+                "test_command": req.test_command,
+            },
         )
         self.session.add(event)
         await self.session.commit()
+
 
         return task
 

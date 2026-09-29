@@ -44,7 +44,16 @@ export interface RepositoryCreate {
   default_branch?: string;
 }
 
-export type TaskType = 'bug' | 'feature' | 'question' | 'security' | 'docs';
+export type TaskType =
+  | 'bug_fix'
+  | 'bug'
+  | 'feature'
+  | 'refactor'
+  | 'test'
+  | 'documentation'
+  | 'docs'
+  | 'question'
+  | 'security';
 
 export type TaskStatus =
   | 'queued'
@@ -74,6 +83,14 @@ export type TaskStatus =
   | 'REJECTED'
   | string;
 
+export interface RepoContextItem {
+  path: string;
+  symbol?: string | null;
+  score: number;
+  reason: string;
+  lines: string;
+}
+
 export interface Task {
   id: string;
   repository_id: string;
@@ -88,13 +105,25 @@ export interface Task {
   iteration: number;
   max_iterations: number;
   error_message?: string;
-  plan?: { text?: string } | null;
+  plan?: {
+    text?: string;
+    target_files?: string[];
+    test_command?: string;
+    repository_context?: RepoContextItem[];
+    git?: {
+      branch: string;
+      status: string;
+      staged_diff?: string;
+      suggested_commit?: string;
+    };
+  } | null;
   root_cause?: { analysis?: string } | null;
   summary?: string | null;
   error?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
+
 
 export interface Change {
   id: string;
@@ -136,11 +165,18 @@ export interface ChatSession {
 }
 
 export interface TaskEvent {
+  id?: string;
+  seq?: number;
   event_type: string;
   task_id: string;
-  timestamp: string;
-  data: Record<string, unknown>;
+  level?: string;
+  message?: string;
+  timestamp?: string;
+  created_at?: string;
+  payload?: Record<string, unknown> | null;
+  data?: Record<string, unknown>;
 }
+
 
 export interface TestResult {
   passed: boolean;

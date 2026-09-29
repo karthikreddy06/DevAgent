@@ -226,27 +226,33 @@ class ApiClient {
       description?: string;
       type?: string;
       base_branch?: string;
-    }
+      target_files?: string[];
+      test_command?: string;
+    },
+    start: boolean = true
   ): Promise<Task> {
-    return this.request<Task>('/v1/tasks', {
+    const query = start ? '?start=true' : '?start=false';
+    return this.request<Task>(`/v1/tasks${query}`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
   async runTask(
-    id: string
+    id: string,
+    wait: boolean = false
   ): Promise<{
     status: string;
     task_id: string;
   }> {
     return this.request(
-      `/v1/tasks/${id}/run`,
+      `/v1/tasks/${id}/run?wait=${wait}`,
       {
         method: 'POST',
       }
     );
   }
+
 
   async cancelTask(id: string): Promise<Task> {
     return this.request<Task>(

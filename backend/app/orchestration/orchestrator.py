@@ -235,8 +235,12 @@ class TaskOrchestrator:
 
     async def execute_task(self, task: Task, workspace: Path) -> TaskStatus:
         """Run the end-to-end task execution pipeline."""
+        from app.core.logging import bind_context
+
+        bind_context(task_id=str(task.id), repository_id=str(task.repository_id))
         budget = BudgetTracker.from_settings(self.settings)
         retriever = HybridRetriever(repository_id=task.repository_id, session=self.session)
+
 
         async def _tool_notify(ev_type: str, msg: str, data: dict[str, Any] | None) -> None:
             await self.emit_event(task, ev_type, msg, data)
@@ -254,15 +258,31 @@ class TaskOrchestrator:
         )
 
         # Seed RAG search on task title and description to help planner, codebase, debugger
-        search_query = f"{task.title} {task.description or ''}".strip()
+        target_files = None
+        if task.plan and isinstance(task.plan, dict):
+            target_files = task.plan.get("target_files")
+
         rag_snippets: list[str] = []
-        if retriever and search_query:
+        repo_context_data: list[dict[str, Any]] = []
+        if retriever:
             try:
-                hits = await retriever.search(search_query, top_k=6)
+                hits = await retriever.retrieve_task_context(
+                    task.title,
+                    task.description or "",
+                    target_files=target_files,
+                    top_k=6,
+                )
                 for h in hits:
                     rag_snippets.append(
-                        f"File: {h.path} (lines {h.start_line}-{h.end_line}, score={h.score:.2f}):\n{h.content}"
+                        f"File: {h.path} (lines {h.start_line}-{h.end_line}, score={h.score:.2f}, reason={h.reason}):\n{h.content}"
                     )
+                    repo_context_data.append({
+                        "path": h.path,
+                        "symbol": h.symbol_name,
+                        "score": round(h.score, 2),
+                        "reason": h.reason or "Relevant to task query",
+                        "lines": f"{h.start_line}-{h.end_line}",
+                    })
             except Exception as e:
                 logger.warning("rag_search_error", error=str(e))
         rag_context_str = "\n\n".join(rag_snippets)
@@ -272,6 +292,14 @@ class TaskOrchestrator:
         from app.agents.planner.planner import PlannerAgent
 
         try:
+            if repo_context_data:
+                await self.emit_event(
+                    task,
+                    "context_retrieved",
+                    f"Retrieved {len(repo_context_data)} relevant code sections from repository",
+                    {"items": repo_context_data},
+                )
+
             # 1. PLANNING
             await self._transition(task, TaskStatus.PLANNING, "Starting planning phase", tool_context)
             planner = PlannerAgent(self.llm, self.registry)
@@ -283,8 +311,12 @@ class TaskOrchestrator:
                 self.session,
                 extra_context={"rag_context": rag_context_str},
             )
-            task.plan = {"text": plan_text}
+            current_plan = dict(task.plan) if (task.plan and isinstance(task.plan, dict)) else {}
+            current_plan["text"] = plan_text
+            current_plan["repository_context"] = repo_context_data
+            task.plan = current_plan
             await self.emit_event(task, "plan_created", "Plan formulated by Planner agent", {"plan": plan_text[:500]})
+
 
             # 2. ANALYZING
             await self._transition(task, TaskStatus.ANALYZING, "Analyzing codebase structure", tool_context)

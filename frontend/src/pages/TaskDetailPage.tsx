@@ -13,6 +13,13 @@ import {
   Repeat,
   Radio,
   FileCode,
+  Database,
+  ShieldCheck,
+  Cpu,
+  Layers,
+  Check,
+  AlertTriangle,
+  GitCommit,
 } from 'lucide-react';
 import { Change, ChatMessage, Task, TaskEvent } from '../types';
 import { Badge } from '../components/Badge';
@@ -24,6 +31,18 @@ interface TaskDetailPageProps {
   onBack: () => void;
   onTaskUpdated?: () => void;
 }
+
+const LIFECYCLE_STAGES = [
+  { key: 'CREATED', label: 'Created' },
+  { key: 'PLANNING', label: 'Planning' },
+  { key: 'ANALYZING', label: 'Analyzing' },
+  { key: 'INVESTIGATING', label: 'Investigating' },
+  { key: 'FIX_PROPOSED', label: 'Fix Proposed' },
+  { key: 'AWAITING_APPROVAL', label: 'Approval Gate' },
+  { key: 'APPLYING', label: 'Applying' },
+  { key: 'TESTING', label: 'Testing' },
+  { key: 'COMPLETED', label: 'Completed' },
+];
 
 export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
   taskId,
@@ -43,7 +62,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Load Task and Changes
+  // Load Task, Changes, and Events
   const loadData = async () => {
     try {
       const taskData = await api.getTask(taskId);
@@ -58,24 +77,32 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
 
   useEffect(() => {
     loadData();
+
     // Connect SSE stream
     const unsubscribe = api.streamTaskEvents(
       taskId,
       (event) => {
         setEvents((prev) => [...prev, event]);
-        // Update task state if event contains status change
-        if (event.event_type === 'status_change' && event.data?.status) {
-          setTask((prev) => (prev ? { ...prev, status: event.data.status as Task['status'] } : prev));
+        const newStatus = (event.payload?.new_status || event.data?.status || event.data?.new_status) as Task['status'] | undefined;
+        if (event.event_type === 'status_change' && newStatus) {
+          setTask((prev) => (prev ? { ...prev, status: newStatus } : prev));
           if (onTaskUpdated) onTaskUpdated();
         }
+
       },
       (err) => {
         console.warn('SSE stream closed or error:', err);
       }
     );
 
+    // Polling fallback while task is in active running states
+    const interval = setInterval(() => {
+      loadData();
+    }, 2500);
+
     return () => {
       unsubscribe();
+      clearInterval(interval);
     };
   }, [taskId]);
 
@@ -93,7 +120,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     setActionLoading(true);
     setActionMessage(null);
     try {
-      await api.runTask(taskId);
+      await api.runTask(taskId, false);
       setActionMessage('Agent execution started!');
       loadData();
       if (onTaskUpdated) onTaskUpdated();
@@ -129,7 +156,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     try {
       await api.reviewChange(changeId, approved, reviewReason);
       setReviewReason('');
-      setActionMessage(approved ? 'Change approved!' : 'Change rejected.');
+      setActionMessage(approved ? 'Change approved! Applying fix in isolated workspace...' : 'Change rejected.');
       loadData();
       if (onTaskUpdated) onTaskUpdated();
     } catch (err: unknown) {
@@ -155,13 +182,12 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     setChatMessages((prev) => [...prev, userMsg]);
     setChatInput('');
 
-    // Synthetic agent echo response for interactive demonstration
     setTimeout(() => {
       const agentMsg: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
         session_id: taskId,
         role: 'assistant',
-        content: `Acknowledged instruction: "${userMsg.content}". I have updated my working context and will verify code AST references before planning subsequent edits.`,
+        content: `Acknowledged instruction: "${userMsg.content}". Working context updated.`,
         created_at: new Date().toISOString(),
       };
       setChatMessages((prev) => [...prev, agentMsg]);
@@ -177,6 +203,14 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
   }
 
   const latestChange = changes[0];
+  const currentStatus = (task.status || '').toUpperCase();
+  const isRejected = currentStatus === 'REJECTED';
+  const isFailed = currentStatus === 'FAILED';
+
+  const currentStageIndex = LIFECYCLE_STAGES.findIndex((s) => s.key === currentStatus);
+
+  const repoContext = task.plan?.repository_context || [];
+  const gitInfo = task.plan?.git;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -210,7 +244,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
               <Badge type={task.type} />
               <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>{task.title}</h2>
               <Badge status={task.status} />
@@ -223,21 +257,28 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                 gap: '16px',
                 fontSize: '0.8rem',
                 color: 'var(--text-muted)',
+                flexWrap: 'wrap',
               }}
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <GitBranch size={14} />
-                Base: <strong>{task.base_branch}</strong>
+                Base: <strong>{task.base_branch || 'main'}</strong>
               </span>
-              {task.fix_branch && (
+              {task.plan?.test_command && (
                 <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Terminal size={14} />
+                  Test Cmd: <code>{task.plan.test_command}</code>
+                </span>
+              )}
+              {gitInfo?.branch && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#818cf8' }}>
                   <GitPullRequest size={14} />
-                  Fix: <strong>{task.fix_branch}</strong>
+                  Local Branch: <strong>{gitInfo.branch}</strong>
                 </span>
               )}
               <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <Repeat size={14} />
-                Iteration: <strong>{task.iteration} / {task.max_iterations}</strong>
+                Iteration: <strong>{task.iteration} / {task.max_iterations || 3}</strong>
               </span>
             </div>
           </div>
@@ -284,6 +325,168 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           }}
         >
           {actionMessage}
+        </div>
+      )}
+
+      {/* Autonomous Workflow Stepper */}
+      <div
+        className="glass-panel"
+        style={{
+          padding: '16px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Autonomous Lifecycle Progress
+          </span>
+          <span style={{ fontSize: '0.75rem', color: isCompletedStatus(currentStatus) ? '#34d399' : isFailed ? '#f87171' : '#818cf8' }}>
+            Current State: <strong>{currentStatus}</strong>
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflowX: 'auto', paddingBottom: '4px' }}>
+          {LIFECYCLE_STAGES.map((stage, idx) => {
+            const isPassed = currentStageIndex > idx && !isRejected && !isFailed;
+            const isCurrent = currentStageIndex === idx;
+            const isTerminalNegative = (isRejected || isFailed) && currentStageIndex === idx;
+
+            return (
+              <React.Fragment key={stage.key}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 10px',
+                    borderRadius: '6px',
+                    backgroundColor: isCurrent
+                      ? 'rgba(99, 102, 241, 0.2)'
+                      : isPassed
+                      ? 'rgba(16, 185, 129, 0.1)'
+                      : isTerminalNegative
+                      ? 'rgba(239, 68, 68, 0.2)'
+                      : 'rgba(255, 255, 255, 0.03)',
+                    border: isCurrent
+                      ? '1px solid var(--primary)'
+                      : isPassed
+                      ? '1px solid rgba(16, 185, 129, 0.3)'
+                      : isTerminalNegative
+                      ? '1px solid rgba(239, 68, 68, 0.4)'
+                      : '1px solid transparent',
+                    color: isCurrent
+                      ? '#ffffff'
+                      : isPassed
+                      ? '#34d399'
+                      : isTerminalNegative
+                      ? '#f87171'
+                      : 'var(--text-dim)',
+                    fontSize: '0.75rem',
+                    fontWeight: isCurrent ? 600 : 400,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {isPassed ? (
+                    <Check size={12} color="#34d399" />
+                  ) : isTerminalNegative ? (
+                    <XCircle size={12} color="#f87171" />
+                  ) : isCurrent ? (
+                    <span
+                      style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        backgroundColor: 'var(--primary)',
+                        display: 'inline-block',
+                      }}
+                    />
+                  ) : (
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{idx + 1}</span>
+                  )}
+                  <span>{stage.label}</span>
+                </div>
+                {idx < LIFECYCLE_STAGES.length - 1 && (
+                  <span style={{ color: isPassed ? '#34d399' : 'rgba(255, 255, 255, 0.15)', fontSize: '0.7rem' }}>
+                    →
+                  </span>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Repository Context Section (Phase 6) */}
+      {repoContext.length > 0 && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '16px 20px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Database size={16} color="var(--primary)" />
+              <h3 style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                Repository Context (Ranked Evidence)
+              </h3>
+            </div>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+              {repoContext.length} code sections retrieved via hybrid vector + symbol analysis
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+              gap: '10px',
+            }}
+          >
+            {repoContext.map((item, idx) => (
+              <div
+                key={idx}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: '6px',
+                  backgroundColor: 'rgba(0, 0, 0, 0.25)',
+                  border: '1px solid var(--border-color)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  fontSize: '0.75rem',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <code style={{ color: '#818cf8', fontWeight: 600 }}>{item.path}</code>
+                  <span
+                    style={{
+                      padding: '1px 6px',
+                      borderRadius: '4px',
+                      backgroundColor: 'rgba(99, 102, 241, 0.15)',
+                      color: 'var(--primary)',
+                      fontSize: '0.7rem',
+                    }}
+                  >
+                    {Math.round(item.score * 100)}% match
+                  </span>
+                </div>
+                {item.symbol && (
+                  <div style={{ color: '#38bdf8' }}>
+                    Symbol: <strong>{item.symbol}</strong> (lines {item.lines})
+                  </div>
+                )}
+                <div style={{ color: 'var(--text-dim)', lineHeight: 1.3 }}>
+                  {item.reason}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -345,6 +548,35 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
         </div>
       )}
 
+      {/* Git Branch / Commit-Ready Status (Phase 8) */}
+      {gitInfo && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '16px 20px',
+            fontSize: '0.875rem',
+            borderLeft: '4px solid #818cf8',
+            backgroundColor: 'rgba(99, 102, 241, 0.08)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#818cf8', fontWeight: 600 }}>
+            <GitCommit size={16} />
+            <span>Local Git Branch Prepared (Commit-Ready)</span>
+          </div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            Changes are applied and staged on local branch <code>{gitInfo.branch}</code> inside the workspace. No changes have been pushed to remote.
+          </div>
+          {gitInfo.suggested_commit && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+              Suggested commit message: <code>{gitInfo.suggested_commit}</code>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Tabs Header */}
       <div
         style={{
@@ -401,7 +633,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           }}
         >
           <FileCode size={16} />
-          <span>Proposed Diff</span>
+          <span>Proposed Diff & Approvals</span>
           {changes.length > 0 && (
             <span
               style={{
@@ -464,7 +696,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
               <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Live Agent Event Stream</span>
             </div>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-              Connected via Server-Sent Events (SSE)
+              Connected via Server-Sent Events (SSE) & polling
             </span>
           </div>
 
@@ -492,16 +724,21 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                     padding: '8px 12px',
                     borderRadius: '6px',
                     backgroundColor: 'rgba(0, 0, 0, 0.3)',
-                    borderLeft: '3px solid var(--primary)',
+                    borderLeft: evt.level === 'error'
+                      ? '3px solid #f87171'
+                      : evt.level === 'warning'
+                      ? '3px solid #fbbf24'
+                      : '3px solid var(--primary)',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-dim)', fontSize: '0.7rem' }}>
                     <span style={{ color: 'var(--primary)', fontWeight: 600 }}>[{evt.event_type.toUpperCase()}]</span>
-                    <span>{new Date(evt.timestamp).toLocaleTimeString()}</span>
+                    <span>{new Date(evt.timestamp || evt.created_at || Date.now()).toLocaleTimeString()}</span>
                   </div>
                   <div style={{ color: '#e2e8f0', marginTop: '4px' }}>
-                    {JSON.stringify(evt.data, null, 2)}
+                    {evt.message || (typeof evt.data?.message === 'string' ? evt.data.message : '') || (evt.data ? JSON.stringify(evt.data, null, 2) : (evt.payload ? JSON.stringify(evt.payload, null, 2) : ''))}
                   </div>
+
                 </div>
               ))
             )}
@@ -514,8 +751,8 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
       {activeTab === 'diff' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           {/* Approval Action Gate if awaiting approval */}
-          {(task.status?.toLowerCase() === 'awaiting_approval' ||
-            task.status?.toLowerCase() === 'fix_proposed') &&
+          {(task.status?.toUpperCase() === 'AWAITING_APPROVAL' ||
+            task.status?.toUpperCase() === 'FIX_PROPOSED') &&
             latestChange && (
             <div
               className="glass-panel"
@@ -533,7 +770,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                   Human-in-the-Loop Approval Required
                 </h3>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                  The agent has generated code modifications and verified tests. Please inspect the diff below before approving merge into the target branch.
+                  The agent has generated code modifications and pre-validated the patch cleanly. Inspect the unified diff below before approving application to the isolated workspace.
                 </p>
               </div>
 
@@ -544,7 +781,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                 <input
                   type="text"
                   className="input-field"
-                  placeholder="e.g. Looks good, approved fix for token expiration check."
+                  placeholder="e.g. Approved modernizing model_config to ConfigDict."
                   value={reviewReason}
                   onChange={(e) => setReviewReason(e.target.value)}
                 />
@@ -558,7 +795,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                   style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}
                 >
                   <CheckCircle size={16} />
-                  <span>Approve & Merge Fix</span>
+                  <span>Approve & Apply Patch</span>
                 </button>
                 <button
                   onClick={() => handleReviewChange(latestChange.id, false)}
@@ -566,7 +803,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                   className="btn-danger"
                 >
                   <XCircle size={16} />
-                  <span>Reject & Request Changes</span>
+                  <span>Reject Changes</span>
                 </button>
               </div>
             </div>
@@ -674,3 +911,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     </div>
   );
 };
+
+function isCompletedStatus(status: string): boolean {
+  return status === 'COMPLETED';
+}

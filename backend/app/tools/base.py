@@ -33,6 +33,8 @@ class CodeHit:
     symbol_name: str | None = None
     language: str = "unknown"
     source: str = "hybrid"
+    reason: str = ""
+
 
 
 class CodeSearch(Protocol):

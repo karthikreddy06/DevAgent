@@ -25,8 +25,40 @@ async def create_task(
     req: TaskCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[TaskService, Depends(get_task_service)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    start: bool = Query(default=True, description="Immediately queue and launch the task"),
 ) -> TaskRead:
     task = await service.create_task(req, creator=current_user)
+
+    if start:
+        from app.core.config import get_settings
+        from app.core.logging import get_logger
+
+        settings = get_settings()
+        log = get_logger(__name__)
+
+        try:
+            from arq import create_pool
+            from arq.connections import RedisSettings
+
+            redis_pool = await create_pool(
+                RedisSettings.from_dsn(settings.redis_url),
+                default_queue_name=settings.task_queue_name(),
+            )
+            await redis_pool.enqueue_job(
+                "run_task_job",
+                str(task.id),
+                _queue_name=settings.task_queue_name(),
+            )
+            log.info("task_auto_queued_on_create", task_id=str(task.id))
+        except Exception as exc:
+            log.warning("task_auto_queue_fallback_asyncio", error=str(exc))
+            import asyncio
+            from app.workers.jobs.run_task import run_task_job
+
+            asyncio.create_task(run_task_job({}, str(task.id)))
+
+    await db.refresh(task)
     return TaskRead.model_validate(task)
 
 
@@ -67,6 +99,7 @@ async def run_task(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[TaskService, Depends(get_task_service)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    wait: bool = Query(default=False, description="Wait for task execution synchronously before returning"),
 ) -> TaskRead:
     from app.core.config import get_settings
     from app.core.logging import get_logger
@@ -88,16 +121,22 @@ async def run_task(
             str(task.id),
             _queue_name=settings.task_queue_name(),
         )
-        if job:
+        if wait and job:
             await job.result(timeout=settings.task_timeout_seconds)
     except Exception as exc:
         log.warning("enqueue_run_task_job_fallback_direct", error=str(exc))
         from app.workers.jobs.run_task import run_task_job
 
-        await run_task_job({}, str(task.id))
+        if wait:
+            await run_task_job({}, str(task.id))
+        else:
+            import asyncio
+
+            asyncio.create_task(run_task_job({}, str(task.id)))
 
     await db.refresh(task)
     return TaskRead.model_validate(task)
+
 
 
 @router.get("/{task_id}/events", response_model=list[TaskEventRead])

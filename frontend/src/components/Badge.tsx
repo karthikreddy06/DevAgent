@@ -41,17 +41,23 @@ export const Badge: React.FC<BadgeProps> = ({ status, type, children, className 
   const getTypeClass = (t?: string) => {
     switch (t?.toLowerCase()) {
       case 'bug':
+      case 'bug_fix':
         return 'badge-danger';
       case 'security':
         return 'badge-warning';
       case 'feature':
         return 'badge-primary';
+      case 'refactor':
+      case 'test':
+        return 'badge-primary';
       case 'docs':
+      case 'documentation':
       case 'question':
       default:
         return 'badge-secondary';
     }
   };
+
 
   const badgeClass = status ? getStatusClass(status) : getTypeClass(type);
   const label = children || status || type;

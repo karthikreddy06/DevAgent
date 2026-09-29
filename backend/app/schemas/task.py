@@ -15,8 +15,11 @@ class TaskCreate(BaseModel):
     repository_id: uuid.UUID
     title: str = Field(min_length=1, max_length=255)
     description: str = Field(min_length=1)
-    type: TaskType = TaskType.BUG
+    type: TaskType = TaskType.BUG_FIX
     base_branch: str | None = None
+    target_files: list[str] | None = None
+    test_command: str | None = None
+
 
 
 class TaskEventRead(BaseModel):

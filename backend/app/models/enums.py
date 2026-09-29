@@ -22,11 +22,16 @@ class TaskStatus(StrEnum):
 
 
 class TaskType(StrEnum):
+    BUG_FIX = "bug_fix"
     BUG = "bug"
     FEATURE = "feature"
+    REFACTOR = "refactor"
+    TEST = "test"
+    DOCUMENTATION = "documentation"
+    DOCS = "docs"
     QUESTION = "question"
     SECURITY = "security"
-    DOCS = "docs"
+
 
 
 class AgentName(StrEnum):

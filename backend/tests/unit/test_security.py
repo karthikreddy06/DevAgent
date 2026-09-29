@@ -63,3 +63,41 @@ def test_jwt_token_issue_and_decode() -> None:
 def test_constant_time_equals() -> None:
     assert constant_time_equals("abc123xyz", "abc123xyz") is True
     assert constant_time_equals("abc123xyz", "abc123xyw") is False
+
+
+@pytest.mark.unit
+def test_null_byte_path_rejection() -> None:
+    from app.core.paths import normalize_relative_path
+
+    with pytest.raises(ValidationError, match="illegal character"):
+        normalize_relative_path("src/sneaky\x00file.py")
+
+
+@pytest.mark.unit
+def test_symlink_and_workspace_containment(tmp_path: Path) -> None:
+    from app.core.paths import ensure_within
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    inside_file = workspace / "allowed.py"
+    inside_file.write_text("ok")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "secret.txt"
+    outside_file.write_text("secret")
+
+    # Valid inside path
+    assert ensure_within(workspace, inside_file) == inside_file.resolve()
+
+    # Symlink pointing outside workspace root must raise PolicyViolationError
+    link_to_outside = workspace / "link_escape.py"
+    try:
+        link_to_outside.symlink_to(outside_file)
+        from app.core.errors import PolicyViolationError
+        with pytest.raises(PolicyViolationError):
+            ensure_within(workspace, link_to_outside)
+    except OSError:
+        # On Windows without developer mode/admin symlink creation may require privilege, skip if OS denies symlink creation
+        pass
+

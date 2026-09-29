@@ -21,8 +21,10 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
   );
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [taskType, setTaskType] = useState<TaskType>('bug');
+  const [taskType, setTaskType] = useState<TaskType>('bug_fix');
   const [baseBranch, setBaseBranch] = useState('main');
+  const [targetFilesInput, setTargetFilesInput] = useState('');
+  const [testCommandInput, setTestCommandInput] = useState('pytest');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,24 +41,34 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
 
     setLoading(true);
     setError(null);
+
+    const parsedTargetFiles = targetFilesInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     try {
       const task = await api.createTask({
         repository_id: repositoryId,
-        title,
-        description,
+        title: title.trim(),
+        description: description.trim(),
         type: taskType,
         base_branch: baseBranch || 'main',
-      });
+        target_files: parsedTargetFiles.length > 0 ? parsedTargetFiles : undefined,
+        test_command: testCommandInput.trim() || undefined,
+      }, true);
       onTaskCreated(task);
       onClose();
-      // Reset
+      // Reset form
       setTitle('');
       setDescription('');
+      setTargetFilesInput('');
+      setTestCommandInput('pytest');
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError('Failed to create task');
+        setError('Failed to create and start task');
       }
     } finally {
       setLoading(false);
@@ -67,7 +79,7 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Launch New Agent Task"
+      title="Create Autonomous Agent Task"
       footer={
         <>
           <button type="button" onClick={onClose} className="btn-secondary">
@@ -78,8 +90,12 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
             onClick={handleSubmit}
             disabled={loading || repositories.length === 0}
             className="btn-primary"
+            style={{
+              background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
+              fontWeight: 600,
+            }}
           >
-            {loading ? 'Creating...' : 'Create & Launch'}
+            {loading ? 'Starting Task...' : 'Start Task'}
           </button>
         </>
       }
@@ -115,7 +131,7 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
             >
               {repositories.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.name} ({r.owner})
+                  {r.name} ({r.owner || 'local'}) — {r.index_status || 'READY'}
                 </option>
               ))}
             </select>
@@ -131,11 +147,11 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
             value={taskType}
             onChange={(e) => setTaskType(e.target.value as TaskType)}
           >
-            <option value="bug">Bug Fix (Investigate, Patch, Verify)</option>
-            <option value="feature">Feature Request (Implement & Test)</option>
-            <option value="security">Security Audit & Remediation</option>
-            <option value="docs">Documentation Generation</option>
-            <option value="question">Architecture Question / Exploration</option>
+            <option value="bug_fix">BUG_FIX — Investigate, Propose Patch & Verify</option>
+            <option value="feature">FEATURE — Autonomous Feature Implementation</option>
+            <option value="refactor">REFACTOR — Code Modernization & Refactoring</option>
+            <option value="test">TEST — Test Suite & Regression Hardening</option>
+            <option value="documentation">DOCUMENTATION — API Docs & Schema Typing</option>
           </select>
         </div>
 
@@ -147,7 +163,7 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
             type="text"
             required
             className="input-field"
-            placeholder="e.g. Fix token expiration check in AuthManager"
+            placeholder="e.g. Fix invalid prediction input handling"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -160,11 +176,39 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
           <textarea
             className="input-field"
             rows={4}
-            placeholder="Describe expected behavior, failing test names, stack traces, or relevant modules..."
+            placeholder="Describe the issue, expected behavior, failing scenarios, or relevant endpoints..."
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             style={{ resize: 'vertical' }}
           />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          <div>
+            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+              Optional Target Files
+            </label>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="e.g. backend/app/schemas.py"
+              value={targetFilesInput}
+              onChange={(e) => setTargetFilesInput(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+              Optional Test Command
+            </label>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="pytest"
+              value={testCommandInput}
+              onChange={(e) => setTestCommandInput(e.target.value)}
+            />
+          </div>
         </div>
 
         <div>
@@ -183,3 +227,4 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
     </Modal>
   );
 };
+
