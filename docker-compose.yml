@@ -30,18 +30,20 @@ services:
       dockerfile: infra/backend.Dockerfile
       target: runtime
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    user: root
     env_file:
       - path: .env
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://devagent:devagent@localhost:5432/devagent}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://redis:6379/0
       WORKSPACES_DIR: /data/workspaces
       ARTIFACTS_DIR: /data/artifacts
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - devagent-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
@@ -66,15 +68,13 @@ services:
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://devagent:devagent@localhost:5432/devagent}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://redis:6379/0
       WORKSPACES_DIR: /data/workspaces
       ARTIFACTS_DIR: /data/artifacts
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - devagent-data:/data
-      # The docker socket is mounted ONLY here. It is never mounted into the API
-      # container and never into sandbox containers.
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       redis: { condition: service_healthy }
