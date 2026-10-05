@@ -140,4 +140,3 @@ class TaskEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<TaskEvent #{self.seq} {self.type}>"
-

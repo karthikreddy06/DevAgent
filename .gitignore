@@ -1,18 +1,30 @@
-# Secrets / environment
+# Secrets and environment files
 .env
 .env.*
+.env.local
+.env.*.local
 !.env.example
 secrets/
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
 
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
 venv/
+env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+dist/
+build/
 .coverage
 coverage.xml
 htmlcov/
@@ -20,21 +32,36 @@ htmlcov/
 *.sqlite
 *.sqlite3
 
-# Node / frontend
+# Node and frontend
 node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
 
 # DevAgent runtime data (workspaces, artifacts, cloned repos, logs)
 data/
 backend/data/
 logs/
 *.log
+*.pid
+*.seed
 
-# Editors / OS
+# Editors, IDEs, and OS
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+[Dd]esktop.ini
 

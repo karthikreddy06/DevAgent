@@ -1,0 +1,31 @@
+name: devagent-prod
+
+# =============================================================================
+# DevAgent Production Docker Compose Stack
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Key Production Characteristics:
+#   1. Frontend is exposed on standard HTTP port 80 (or FRONTEND_PORT).
+#   2. Backend (port 8000) and Redis (port 6379) are kept INTERNAL to the Docker
+#      network and are NOT published directly to the host public interfaces.
+#   3. Services use restart: always.
+# =============================================================================
+
+services:
+  backend:
+    ports: !reset []
+    restart: always
+
+  worker:
+    restart: always
+
+  redis:
+    ports: !reset []
+    restart: always
+
+  frontend:
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    restart: always

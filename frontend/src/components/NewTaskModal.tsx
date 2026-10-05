@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Modal } from './Modal';
 import { api } from '../api/client';
 import { Repository, Task, TaskType } from '../types';
@@ -6,6 +6,7 @@ import { Repository, Task, TaskType } from '../types';
 interface NewTaskModalProps {
   isOpen: boolean;
   repositories: Repository[];
+  initialRepositoryId?: string;
   onClose: () => void;
   onTaskCreated: (task: Task) => void;
 }
@@ -13,11 +14,12 @@ interface NewTaskModalProps {
 export const NewTaskModal: React.FC<NewTaskModalProps> = ({
   isOpen,
   repositories,
+  initialRepositoryId,
   onClose,
   onTaskCreated,
 }) => {
   const [repositoryId, setRepositoryId] = useState<string>(
-    repositories.length > 0 ? repositories[0].id : ''
+    initialRepositoryId || (repositories.length > 0 ? repositories[0].id : '')
   );
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -28,9 +30,28 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Synchronize repository selection with repositories prop and modal open state
+  useEffect(() => {
+    if (!isOpen) return;
+
+    setError(null);
+    if (repositories.length > 0) {
+      setRepositoryId((currentId) => {
+        if (initialRepositoryId && repositories.some((r) => r.id === initialRepositoryId)) {
+          return initialRepositoryId;
+        }
+        const exists = repositories.some((r) => r.id === currentId);
+        return exists && currentId ? currentId : repositories[0].id;
+      });
+    } else {
+      setRepositoryId('');
+    }
+  }, [isOpen, repositories, initialRepositoryId]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!repositoryId) {
+    const effectiveRepoId = repositoryId || (repositories.length > 0 ? repositories[0].id : '');
+    if (!effectiveRepoId) {
       setError('Please select a repository');
       return;
     }
@@ -49,7 +70,7 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
 
     try {
       const task = await api.createTask({
-        repository_id: repositoryId,
+        repository_id: effectiveRepoId,
         title: title.trim(),
         description: description.trim(),
         type: taskType,
@@ -126,12 +147,15 @@ export const NewTaskModal: React.FC<NewTaskModalProps> = ({
           ) : (
             <select
               className="input-field"
-              value={repositoryId}
-              onChange={(e) => setRepositoryId(e.target.value)}
+              value={repositoryId || (repositories.length > 0 ? repositories[0].id : '')}
+              onChange={(e) => {
+                setRepositoryId(e.target.value);
+                if (error) setError(null);
+              }}
             >
               {repositories.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.name} ({r.owner || 'local'}) — {r.index_status || 'READY'}
+                  {r.name} ({r.full_name ? r.full_name.split('/')[0] : (r.owner || 'local')}) — {r.index_status || 'READY'}
                 </option>
               ))}
             </select>

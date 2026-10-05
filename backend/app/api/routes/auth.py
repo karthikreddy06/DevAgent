@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
@@ -25,7 +25,7 @@ def _safe_user_read(user: User) -> UserRead:
     """Convert a User model to UserRead safely, filling in any missing timestamps."""
     created = getattr(user, "created_at", None)
     if created is None:
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
     return UserRead(
         id=user.id,
         email=user.email,

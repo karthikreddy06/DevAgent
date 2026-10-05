@@ -12,11 +12,11 @@ from app.core.errors import BudgetExhaustedError
 
 @dataclass
 class BudgetTracker:
-    """Monitors token, step, tool-call, and time limits for a single agent execution."""
+    """Monitors token, step, tool-call, and time limits for multi-stage agent execution."""
 
-    max_steps: int = 12
-    max_tool_calls: int = 24
-    max_tokens: int = 120_000
+    max_steps: int = 18
+    max_tool_calls: int = 36
+    max_tokens: int = 150_000
     timeout_seconds: float = 900.0
 
     steps: int = 0
@@ -24,6 +24,13 @@ class BudgetTracker:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     start_time: float = field(default_factory=time.perf_counter)
+
+    # Current stage isolation
+    current_stage: str | None = None
+    stage_steps: int = 0
+    stage_max_steps: int = 6
+    stage_tool_calls: int = 0
+    stage_max_tool_calls: int = 12
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> BudgetTracker:
@@ -43,13 +50,42 @@ class BudgetTracker:
     def elapsed_seconds(self) -> float:
         return time.perf_counter() - self.start_time
 
+    def start_stage(self, stage_name: str, max_steps: int = 6, max_tool_calls: int = 12) -> None:
+        """Start a new lifecycle stage with isolated step and tool-call limits."""
+        self.current_stage = stage_name
+        self.stage_steps = 0
+        self.stage_max_steps = max_steps
+        self.stage_tool_calls = 0
+        self.stage_max_tool_calls = max_tool_calls
+
+    def can_take_step(self) -> bool:
+        """Return True if step limit not exceeded."""
+        if self.steps >= self.max_steps:
+            return False
+        return not (self.current_stage is not None and self.stage_steps >= self.stage_max_steps)
+
     def record_step(self) -> None:
         self.steps += 1
+        self.stage_steps += 1
         self.check_limits()
 
-    def record_tool_call(self) -> None:
-        self.tool_calls += 1
+    def record_tool_call(self) -> bool:
+        """Record a tool call. Returns False if stage tool budget is exhausted, else True.
+
+        Raises BudgetExhaustedError if task-level tool/token/time limits are exceeded.
+        """
         self.check_limits()
+        if self.tool_calls >= self.max_tool_calls:
+            self.tool_calls += 1
+            self.check_limits()
+
+        if self.current_stage is not None and self.stage_tool_calls >= self.stage_max_tool_calls:
+            return False
+
+        self.tool_calls += 1
+        self.stage_tool_calls += 1
+        self.check_limits()
+        return True
 
     def record_tokens(self, prompt: int, completion: int) -> None:
         self.prompt_tokens += prompt
@@ -84,6 +120,11 @@ class BudgetTracker:
             "max_steps": self.max_steps,
             "tool_calls": self.tool_calls,
             "max_tool_calls": self.max_tool_calls,
+            "stage": self.current_stage,
+            "stage_steps": self.stage_steps,
+            "stage_max_steps": self.stage_max_steps,
+            "stage_tool_calls": self.stage_tool_calls,
+            "stage_max_tool_calls": self.stage_max_tool_calls,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,

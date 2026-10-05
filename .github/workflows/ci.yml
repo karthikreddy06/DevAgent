@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 jobs:
@@ -108,3 +108,5 @@ jobs:
         run: npm run lint
       - name: Unit tests
         run: npm run test -- --run
+      - name: Build
+        run: npm run build

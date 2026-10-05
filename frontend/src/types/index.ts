@@ -117,7 +117,7 @@ export interface Task {
       suggested_commit?: string;
     };
   } | null;
-  root_cause?: { analysis?: string } | null;
+  root_cause?: { analysis?: string; outcome?: string; evidence?: string; [key: string]: unknown } | null;
   summary?: string | null;
   error?: Record<string, unknown> | null;
   created_at: string;

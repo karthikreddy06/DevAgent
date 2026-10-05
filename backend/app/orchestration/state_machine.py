@@ -11,7 +11,13 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PLANNING: frozenset({TaskStatus.ANALYZING, TaskStatus.FAILED, TaskStatus.REJECTED}),
     TaskStatus.ANALYZING: frozenset({TaskStatus.INVESTIGATING, TaskStatus.FAILED, TaskStatus.REJECTED}),
     TaskStatus.INVESTIGATING: frozenset(
-        {TaskStatus.FIX_PROPOSED, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.REJECTED}
+        {
+            TaskStatus.FIX_PROPOSED,
+            TaskStatus.COMPLETED,
+            TaskStatus.NO_CONFIRMED_BUG,
+            TaskStatus.FAILED,
+            TaskStatus.REJECTED,
+        }
     ),
     TaskStatus.FIX_PROPOSED: frozenset({TaskStatus.AWAITING_APPROVAL, TaskStatus.FAILED, TaskStatus.REJECTED}),
     TaskStatus.AWAITING_APPROVAL: frozenset(
@@ -22,7 +28,8 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {TaskStatus.COMPLETED, TaskStatus.INVESTIGATING, TaskStatus.FAILED, TaskStatus.AWAITING_APPROVAL}
     ),
     TaskStatus.COMPLETED: frozenset(),
-    TaskStatus.FAILED: frozenset(),
+    TaskStatus.NO_CONFIRMED_BUG: frozenset(),
+    TaskStatus.FAILED: frozenset({TaskStatus.CREATED, TaskStatus.PLANNING}),
     TaskStatus.REJECTED: frozenset(),
 }
 

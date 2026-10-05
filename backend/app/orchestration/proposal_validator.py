@@ -7,10 +7,8 @@ valid files, and can be properly persisted before moving to AWAITING_APPROVAL.
 
 from __future__ import annotations
 
-import difflib
 import shutil
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +30,7 @@ _COPY_IGNORE_PATTERNS = (
 )
 
 
-def validate_patch_structure(patch_data: dict[str, Any]) -> tuple[bool, str]:
+def validate_patch_structure(patch_data: Any) -> tuple[bool, str]:
     """Verify that patch_data conforms to the expected dictionary schema."""
     if not isinstance(patch_data, dict):
         return False, "Patch data must be a dictionary"
@@ -176,9 +174,7 @@ def validate_proposal_persistable(patch_data: dict[str, Any]) -> tuple[bool, str
     return True, "Proposal can be persisted"
 
 
-def validate_proposal_before_approval(
-    workspace: Path, patch_data: dict[str, Any]
-) -> tuple[bool, str]:
+def validate_proposal_before_approval(workspace: Path, patch_data: dict[str, Any]) -> tuple[bool, str]:
     """End-to-end pre-approval patch validation gate."""
     # 1. Structure
     ok, err = validate_patch_structure(patch_data)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,12 +25,14 @@ from app.schemas.auth import LoginRequest, RegisterRequest
 
 logger = get_logger(__name__)
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 # ---------------------------------------------------------------------------
 # In-memory dev cache — used as fallback when PostgreSQL is not available
 # ---------------------------------------------------------------------------
 _DEV_USERS: dict[uuid.UUID, User] = {}
+
+
 def _make_user(
     *,
     user_id: uuid.UUID,
@@ -43,7 +46,7 @@ def _make_user(
     updated_at: datetime | None = None,
 ) -> User:
     """Create an in-memory User instance with full SQLAlchemy instrumentation."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return User(
         id=user_id,
         email=email,
@@ -70,7 +73,6 @@ _admin = _make_user(
     updated_at=_NOW,
 )
 _DEV_USERS[_ADMIN_ID] = _admin
-
 
 
 class AuthService:
@@ -125,15 +127,13 @@ class AuthService:
                 await self.session.refresh(db_user)
                 user = db_user
                 if not hasattr(user, "created_at") or user.created_at is None:
-                    user.created_at = datetime.now(timezone.utc)
+                    user.created_at = datetime.now(UTC)
                 if not hasattr(user, "updated_at") or user.updated_at is None:
-                    user.updated_at = datetime.now(timezone.utc)
+                    user.updated_at = datetime.now(UTC)
             except Exception as exc:
                 logger.info("db_commit_fallback", error=str(exc))
-                try:
+                with contextlib.suppress(Exception):
                     await self.session.rollback()
-                except Exception:
-                    pass
 
         _DEV_USERS[user.id] = user
         tokens = self.issuer.issue_pair(user_id=user.id, token_version=user.token_version)
@@ -148,7 +148,7 @@ class AuthService:
             res = await self.session.execute(stmt)
             user = res.scalar_one_or_none()
             if user is not None and (not hasattr(user, "created_at") or user.created_at is None):
-                user.created_at = datetime.now(timezone.utc)
+                user.created_at = datetime.now(UTC)
         except Exception as exc:
             logger.info("db_offline_using_dev_cache", error=str(exc))
 
@@ -172,12 +172,10 @@ class AuthService:
         user_id = uuid.UUID(claims.subject)
 
         user: User | None = None
-        try:
+        with contextlib.suppress(Exception):
             stmt = select(User).where(User.id == user_id)
             res = await self.session.execute(stmt)
             user = res.scalar_one_or_none()
-        except Exception:
-            pass
 
         if user is None:
             user = _DEV_USERS.get(user_id)
@@ -192,14 +190,12 @@ class AuthService:
 
     async def get_user_by_id(self, user_id: uuid.UUID) -> User:
         user: User | None = None
-        try:
+        with contextlib.suppress(Exception):
             stmt = select(User).where(User.id == user_id)
             res = await self.session.execute(stmt)
             user = res.scalar_one_or_none()
             if user is not None and (not hasattr(user, "created_at") or user.created_at is None):
-                user.created_at = datetime.now(timezone.utc)
-        except Exception:
-            pass
+                user.created_at = datetime.now(UTC)
 
         if user is None:
             user = _DEV_USERS.get(user_id)

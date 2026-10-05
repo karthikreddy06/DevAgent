@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
+
 import pytest
 
 from app.models.enums import ChangeType
@@ -147,4 +148,3 @@ def test_validate_proposal_persistable() -> None:
 
     ok, _ = validate_proposal_persistable({"unified_diff": "diff content", "path": "src/a.py"})
     assert ok
-

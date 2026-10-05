@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from pydantic import BaseModel, Field
 
 from app.tools.base import Tool, ToolContext, ToolResult
@@ -40,15 +42,13 @@ class RunCommandTool(Tool):
         )
 
         if ctx.session is not None and ctx.task_id is not None:
-            try:
+            with contextlib.suppress(Exception):
                 from app.models.enums import AgentName, RunStatus
                 from app.models.sandbox import SandboxRun
 
                 agent_val = AgentName.DEBUGGER
-                try:
+                with contextlib.suppress(Exception):
                     agent_val = AgentName(ctx.agent)
-                except Exception:
-                    pass
 
                 s_run = SandboxRun(
                     task_id=ctx.task_id,
@@ -67,8 +67,6 @@ class RunCommandTool(Tool):
                 )
                 ctx.session.add(s_run)
                 await ctx.session.flush()
-            except Exception:
-                pass
 
         if output.ok:
             return ToolResult.success(

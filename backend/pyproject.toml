@@ -57,11 +57,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "T20"]
+"tests/**" = ["S101", "S105", "S106", "T20", "ASYNC240", "ASYNC221"]
 "app/tools/docker/policy.py" = ["S603", "S607"]  # the allow-list policy inspects raw argv
 # S108: "/tmp" and "/home/runner/.cache" here are *container* paths inside the
 # sandbox, not host temporary directories.
 "app/tools/docker/*.py" = ["S108"]
+"app/workers/jobs/apply_and_test.py" = ["S603", "S607", "ASYNC221"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "tests"]

@@ -25,6 +25,7 @@ import { Change, ChatMessage, Task, TaskEvent } from '../types';
 import { Badge } from '../components/Badge';
 import { DiffViewer } from '../components/DiffViewer';
 import { api } from '../api/client';
+import { resolveAuthoritativeOutcome } from '../lib/taskOutcome';
 
 interface TaskDetailPageProps {
   taskId: string;
@@ -62,14 +63,54 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const maxSeqRef = useRef<number>(0);
+
   // Load Task, Changes, and Events
   const loadData = async () => {
     try {
-      const taskData = await api.getTask(taskId);
-      setTask(taskData);
+      const [taskData, changesData, eventsData] = await Promise.all([
+        api.getTask(taskId),
+        api.listChanges(taskId),
+        api.listTaskEvents(taskId).catch(() => [] as TaskEvent[]),
+      ]);
 
-      const changesData = await api.listChanges(taskId);
+      setTask((prev) => {
+        if (!prev) return taskData;
+        const currentNorm = (prev.status || '').toUpperCase();
+        const incomingNorm = (taskData.status || '').toUpperCase();
+        const terminalStates = ['COMPLETED', 'FAILED', 'REJECTED'];
+
+        // Terminal protection: do not let an older poll response revert a terminal status unless iteration increased
+        if (terminalStates.includes(currentNorm) && !terminalStates.includes(incomingNorm)) {
+          if (taskData.iteration <= prev.iteration) {
+            return prev;
+          }
+        }
+        return taskData;
+      });
+
       setChanges(changesData);
+
+      if (eventsData && eventsData.length > 0) {
+        setEvents((prev) => {
+          const map = new Map<number | string, TaskEvent>();
+          for (const ev of prev) {
+            const key = ev.seq ?? ev.id ?? JSON.stringify(ev);
+            map.set(key, ev);
+          }
+          for (const ev of eventsData) {
+            const key = ev.seq ?? ev.id ?? JSON.stringify(ev);
+            map.set(key, ev);
+          }
+          const sorted = Array.from(map.values()).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+          if (sorted.length > 0) {
+            maxSeqRef.current = Math.max(maxSeqRef.current, ...sorted.map((e) => e.seq ?? 0));
+          }
+          return sorted;
+        });
+      }
+
+      if (onTaskUpdated) onTaskUpdated();
     } catch (err) {
       console.error('Error loading task details', err);
     }
@@ -82,13 +123,61 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     const unsubscribe = api.streamTaskEvents(
       taskId,
       (event) => {
-        setEvents((prev) => [...prev, event]);
-        const newStatus = (event.payload?.new_status || event.data?.status || event.data?.new_status) as Task['status'] | undefined;
-        if (event.event_type === 'status_change' && newStatus) {
-          setTask((prev) => (prev ? { ...prev, status: newStatus } : prev));
-          if (onTaskUpdated) onTaskUpdated();
+        if (event.seq) {
+          maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
         }
 
+        setEvents((prev) => {
+          if (prev.some((e) => (e.seq && event.seq && e.seq === event.seq) || (e.id && event.id && e.id === event.id))) {
+            return prev;
+          }
+          return [...prev, event].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+        });
+
+        let incomingStatus: Task['status'] | undefined;
+        if (event.event_type === 'status_change') {
+          incomingStatus = (event.payload?.new_status || event.data?.new_status || event.data?.status) as Task['status'];
+        } else if (
+          event.event_type === 'task_failed' ||
+          event.event_type === 'patch_validation_failed' ||
+          event.event_type === 'task_cancelled'
+        ) {
+          incomingStatus = 'FAILED';
+        } else if (event.event_type === 'task_completed') {
+          incomingStatus = 'COMPLETED';
+        } else if (event.event_type === 'task_retried') {
+          incomingStatus = (event.payload?.new_status || 'PLANNING') as Task['status'];
+        }
+
+        if (incomingStatus) {
+          const normIncoming = incomingStatus.toUpperCase() as Task['status'];
+          setTask((prev) => {
+            if (!prev) return prev;
+            const currentNorm = (prev.status || '').toUpperCase();
+            const terminalStates = ['COMPLETED', 'FAILED', 'REJECTED'];
+            const isIncomingTerminal = terminalStates.includes(normIncoming);
+            const isCurrentTerminal = terminalStates.includes(currentNorm);
+
+            // Never let an older SSE event revert a terminal status unless it's a retry or higher iteration
+            const rawIteration = event.payload?.iteration;
+            const eventIteration = typeof rawIteration === 'number' ? rawIteration : undefined;
+            if (isCurrentTerminal && !isIncomingTerminal) {
+              if (event.event_type !== 'task_retried' && (!eventIteration || eventIteration <= prev.iteration)) {
+                return prev;
+              }
+            }
+
+            const updatedIteration =
+              eventIteration && eventIteration > prev.iteration ? eventIteration : prev.iteration;
+
+            return {
+              ...prev,
+              status: normIncoming,
+              iteration: updatedIteration,
+            };
+          });
+          if (onTaskUpdated) onTaskUpdated();
+        }
       },
       (err) => {
         console.warn('SSE stream closed or error:', err);
@@ -120,9 +209,11 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     setActionLoading(true);
     setActionMessage(null);
     try {
+      // Immediately reflect optimistic starting state to protect against duplicate clicks
+      setTask((prev) => (prev ? { ...prev, status: 'PLANNING' } : prev));
       await api.runTask(taskId, false);
       setActionMessage('Agent execution started!');
-      loadData();
+      await loadData();
       if (onTaskUpdated) onTaskUpdated();
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -130,6 +221,28 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
       } else {
         setActionMessage('Run error occurred');
       }
+      await loadData();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRetryTask = async () => {
+    setActionLoading(true);
+    setActionMessage(null);
+    try {
+      setTask((prev) => (prev ? { ...prev, status: 'PLANNING', iteration: prev.iteration + 1, error: null, summary: null } : prev));
+      await api.retryTask(taskId, false);
+      setActionMessage('Task retry started! New execution iteration launched.');
+      await loadData();
+      if (onTaskUpdated) onTaskUpdated();
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setActionMessage(`Retry error: ${err.message}`);
+      } else {
+        setActionMessage('Retry error occurred');
+      }
+      await loadData();
     } finally {
       setActionLoading(false);
     }
@@ -140,7 +253,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
     try {
       await api.cancelTask(taskId);
       setActionMessage('Task cancelled.');
-      loadData();
+      await loadData();
       if (onTaskUpdated) onTaskUpdated();
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -157,7 +270,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
       await api.reviewChange(changeId, approved, reviewReason);
       setReviewReason('');
       setActionMessage(approved ? 'Change approved! Applying fix in isolated workspace...' : 'Change rejected.');
-      loadData();
+      await loadData();
       if (onTaskUpdated) onTaskUpdated();
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -203,14 +316,62 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
   }
 
   const latestChange = changes[0];
-  const currentStatus = (task.status || '').toUpperCase();
-  const isRejected = currentStatus === 'REJECTED';
-  const isFailed = currentStatus === 'FAILED';
+  const gitInfo = task.plan?.git;
+  const outcomeDetails = resolveAuthoritativeOutcome(task, changes, gitInfo);
+  const {
+    isNoConfirmedBug,
+    isFixedAndVerified,
+    isFailed,
+    isAwaitingApproval,
+    isRejected,
+    isActive,
+    isCreated,
+    shouldShowDiagnosis,
+    shouldShowProposedChange,
+    shouldShowGitBranch,
+  } = outcomeDetails;
 
-  const currentStageIndex = LIFECYCLE_STAGES.findIndex((s) => s.key === currentStatus);
+  const currentStatus = (task.status || '').toUpperCase();
+  const statusUpper = currentStatus;
+
+  // Determine stage mapping for terminal failure/rejection/no-bug
+  let effectiveStageKey = currentStatus;
+  if (isFailed) {
+    const stageKeys = LIFECYCLE_STAGES.map((s) => s.key);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      const payload = ev.payload as Record<string, any> | undefined;
+      const s = String(payload?.new_status || '').toUpperCase();
+      if (s && s !== 'FAILED' && stageKeys.includes(s)) {
+        effectiveStageKey = s;
+        break;
+      }
+    }
+    if (effectiveStageKey === 'FAILED') {
+      const errStr = String(task.error?.reason || task.error?.exception || '');
+      if (errStr.includes('pre-approval validation') || errStr.includes('patch')) {
+        effectiveStageKey = 'INVESTIGATING';
+      } else if (errStr.includes('Verification') || errStr.includes('test')) {
+        effectiveStageKey = 'TESTING';
+      } else if (changes.length > 0) {
+        effectiveStageKey = 'APPLYING';
+      } else if (task.root_cause) {
+        effectiveStageKey = 'INVESTIGATING';
+      } else if (task.plan) {
+        effectiveStageKey = 'ANALYZING';
+      } else {
+        effectiveStageKey = 'PLANNING';
+      }
+    }
+  } else if (isRejected) {
+    effectiveStageKey = 'AWAITING_APPROVAL';
+  } else if (isNoConfirmedBug || isFixedAndVerified) {
+    effectiveStageKey = 'COMPLETED';
+  }
+
+  const currentStageIndex = LIFECYCLE_STAGES.findIndex((s) => s.key === effectiveStageKey);
 
   const repoContext = task.plan?.repository_context || [];
-  const gitInfo = task.plan?.git;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -284,18 +445,36 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           </div>
 
           {/* Action buttons */}
-          <div style={{ display: 'flex', gap: '10px' }}>
-            {task.status?.toLowerCase() !== 'completed' &&
-              task.status?.toLowerCase() !== 'failed' &&
-              task.status?.toLowerCase() !== 'rejected' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {isCreated && (
+              <button
+                onClick={handleRunTask}
+                disabled={actionLoading}
+                className="btn-primary"
+              >
+                {actionLoading ? (
+                  <>
+                    <Cpu size={16} className="spin" />
+                    <span>Starting Agent...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} />
+                    <span>Start Agent</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {isActive && (
               <>
                 <button
-                  onClick={handleRunTask}
-                  disabled={actionLoading}
+                  disabled
                   className="btn-primary"
+                  style={{ opacity: 0.75, cursor: 'not-allowed', display: 'flex', alignItems: 'center', gap: '6px' }}
                 >
-                  <Play size={16} />
-                  <span>Start Agent</span>
+                  <Cpu size={16} className="spin" />
+                  <span>Agent Running ({statusUpper})...</span>
                 </button>
                 <button
                   onClick={handleCancelTask}
@@ -306,6 +485,29 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                   <span>Cancel</span>
                 </button>
               </>
+            )}
+
+            {isFailed && (
+              <button
+                onClick={handleRetryTask}
+                disabled={actionLoading}
+                className="btn-primary"
+                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Repeat size={16} className={actionLoading ? 'spin' : ''} />
+                <span>{actionLoading ? 'Retrying Task...' : 'Retry Task'}</span>
+              </button>
+            )}
+
+            {isAwaitingApproval && (
+              <button
+                onClick={() => setActiveTab('diff')}
+                className="btn-primary"
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#eab308', color: '#000' }}
+              >
+                <ShieldCheck size={16} />
+                <span>Review Diff & Approvals</span>
+              </button>
             )}
           </div>
         </div>
@@ -325,6 +527,141 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           }}
         >
           {actionMessage}
+        </div>
+      )}
+
+      {/* Human Approval Gate Guidance Banner */}
+      {isAwaitingApproval && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '16px 20px',
+            backgroundColor: 'rgba(234, 179, 8, 0.12)',
+            borderLeft: '4px solid #eab308',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <ShieldCheck size={22} style={{ color: '#eab308', flexShrink: 0 }} />
+            <div>
+              <strong style={{ color: '#facc15', display: 'block', fontSize: '0.95rem' }}>
+                Human Approval Gate Active
+              </strong>
+              <span style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
+                DevAgent has formulated a proposed fix. Please switch to the Diff & Approvals tab to inspect the diff and approve or reject the changes.
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveTab('diff')}
+            className="btn-primary"
+            style={{ backgroundColor: '#eab308', color: '#000', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <FileCode size={16} />
+            <span>Open Diff & Approvals</span>
+          </button>
+        </div>
+      )}
+
+      {/* Failure & Retry Guidance Banner */}
+      {isFailed && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '16px 20px',
+            backgroundColor: 'rgba(239, 68, 68, 0.12)',
+            borderLeft: '4px solid #ef4444',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <XCircle size={22} style={{ color: '#ef4444', flexShrink: 0 }} />
+            <div>
+              <strong style={{ color: '#f87171', display: 'block', fontSize: '0.95rem' }}>
+                Task Execution Failed
+              </strong>
+              <span style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
+                {String(
+                  task.error?.reason ||
+                  task.error?.exception ||
+                  task.error_message ||
+                  'Execution encountered an error. Click Retry Task to launch a new attempt without losing past events.'
+                )}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={handleRetryTask}
+            disabled={actionLoading}
+            className="btn-primary"
+            style={{ backgroundColor: '#ef4444', display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <Repeat size={16} className={actionLoading ? 'spin' : ''} />
+            <span>{actionLoading ? 'Retrying Task...' : 'Retry Task'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* No Confirmed Bug Outcome Banner */}
+      {isNoConfirmedBug && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '20px',
+            backgroundColor: 'rgba(16, 185, 129, 0.08)',
+            borderLeft: '4px solid #10b981',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <Check size={24} style={{ color: '#34d399', flexShrink: 0 }} />
+            <div>
+              <strong style={{ color: '#34d399', display: 'block', fontSize: '1rem', fontWeight: 700 }}>
+                Investigation Concluded: No Confirmed Bug Found
+              </strong>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                DevAgent thoroughly investigated the codebase and determined that no reproducible software defect exists based on repository evidence. No files were modified.
+              </span>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '10px',
+              paddingTop: '12px',
+              borderTop: '1px solid rgba(16, 185, 129, 0.2)',
+              fontSize: '0.8rem',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-main)' }}>
+              <Check size={14} color="#34d399" />
+              <span><strong>Files Modified:</strong> 0 files (workspace untouched)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-main)' }}>
+              <Check size={14} color="#34d399" />
+              <span><strong>Patch Generated:</strong> None (no changes proposed)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-main)' }}>
+              <Check size={14} color="#34d399" />
+              <span><strong>Approval Gate:</strong> Not requested</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-main)' }}>
+              <Check size={14} color="#34d399" />
+              <span><strong>Verification Status:</strong> Clean state confirmed</span>
+            </div>
+          </div>
         </div>
       )}
 
@@ -349,9 +686,9 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflowX: 'auto', paddingBottom: '4px' }}>
           {LIFECYCLE_STAGES.map((stage, idx) => {
-            const isPassed = currentStageIndex > idx && !isRejected && !isFailed;
-            const isCurrent = currentStageIndex === idx;
             const isTerminalNegative = (isRejected || isFailed) && currentStageIndex === idx;
+            const isCurrent = currentStageIndex === idx && !isRejected && !isFailed;
+            const isPassed = currentStageIndex > idx;
 
             return (
               <React.Fragment key={stage.key}>
@@ -362,29 +699,29 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                     gap: '6px',
                     padding: '6px 10px',
                     borderRadius: '6px',
-                    backgroundColor: isCurrent
+                    backgroundColor: isTerminalNegative
+                      ? 'rgba(239, 68, 68, 0.2)'
+                      : isCurrent
                       ? 'rgba(99, 102, 241, 0.2)'
                       : isPassed
                       ? 'rgba(16, 185, 129, 0.1)'
-                      : isTerminalNegative
-                      ? 'rgba(239, 68, 68, 0.2)'
                       : 'rgba(255, 255, 255, 0.03)',
-                    border: isCurrent
+                    border: isTerminalNegative
+                      ? '1px solid rgba(239, 68, 68, 0.4)'
+                      : isCurrent
                       ? '1px solid var(--primary)'
                       : isPassed
                       ? '1px solid rgba(16, 185, 129, 0.3)'
-                      : isTerminalNegative
-                      ? '1px solid rgba(239, 68, 68, 0.4)'
                       : '1px solid transparent',
-                    color: isCurrent
+                    color: isTerminalNegative
+                      ? '#f87171'
+                      : isCurrent
                       ? '#ffffff'
                       : isPassed
                       ? '#34d399'
-                      : isTerminalNegative
-                      ? '#f87171'
                       : 'var(--text-dim)',
                     fontSize: '0.75rem',
-                    fontWeight: isCurrent ? 600 : 400,
+                    fontWeight: isCurrent || isTerminalNegative ? 600 : 400,
                     whiteSpace: 'nowrap',
                   }}
                 >
@@ -508,8 +845,8 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
         </div>
       )}
 
-      {/* Root Cause / Analysis Panel if available */}
-      {task.root_cause?.analysis && (
+      {/* Root Cause / Analysis Panel - strictly suppressed if NO_CONFIRMED_BUG or FAILED */}
+      {shouldShowDiagnosis && task.root_cause?.analysis && (
         <div
           className="glass-panel"
           style={{
@@ -530,7 +867,7 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
       )}
 
       {/* Task Summary / Verification Outcome */}
-      {task.summary && (
+      {!isFailed && task.summary && (
         <div
           className="glass-panel"
           style={{
@@ -542,14 +879,18 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
           }}
         >
           <strong style={{ color: '#34d399', display: 'block', marginBottom: '6px' }}>
-            Verification Summary:
+            {isNoConfirmedBug ? 'Authoritative Outcome:' : 'Verification Summary:'}
           </strong>
-          <div style={{ color: 'var(--text-main)' }}>{task.summary}</div>
+          <div style={{ color: 'var(--text-main)' }}>
+            {isNoConfirmedBug
+              ? 'No reproducible defect was established from repository evidence. No files were modified, no patch was generated, and no approval was requested.'
+              : task.summary}
+          </div>
         </div>
       )}
 
-      {/* Git Branch / Commit-Ready Status (Phase 8) */}
-      {gitInfo && (
+      {/* Git Branch / Commit-Ready Status (Phase 8) - only for genuine verified fixes */}
+      {shouldShowGitBranch && gitInfo && (
         <div
           className="glass-panel"
           style={{
@@ -825,7 +1166,27 @@ export const TaskDetailPage: React.FC<TaskDetailPageProps> = ({
                 fontSize: '0.875rem',
               }}
             >
-              No patch generated yet. Once the agent produces edits, the unified diff will appear here.
+              {isNoConfirmedBug ? (
+                <div>
+                  <div style={{ fontWeight: 600, color: 'var(--text-main)', marginBottom: '6px' }}>
+                    No Patch Generated
+                  </div>
+                  <div>
+                    DevAgent concluded that no reproducible defect exists in the repository. No code modifications were proposed, applied, or requested for approval.
+                  </div>
+                </div>
+              ) : isFailed ? (
+                <div>
+                  <div style={{ fontWeight: 600, color: '#f87171', marginBottom: '6px' }}>
+                    No Patch Available
+                  </div>
+                  <div>
+                    The task failed before a valid patch could be proposed and approved.
+                  </div>
+                </div>
+              ) : (
+                'No patch generated yet. Once the agent produces edits, the unified diff will appear here.'
+              )}
             </div>
           )}
         </div>

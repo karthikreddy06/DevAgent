@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import NotFoundError, PolicyViolationError
 from app.core.logging import get_logger
 from app.llm.base import LLMMessage, LLMProvider
 from app.models.agent import AgentRun, AgentStep, ToolExecution
@@ -24,29 +25,31 @@ logger = get_logger(__name__)
 
 # Matches ```json { "tool": "name", "args": {...} } ``` or { "tool": "...", "args": {...} }
 _TOOL_CALL_RE = re.compile(r"```(?:json)?\s*(\{\s*\"tool\".*?\})\s*```", re.DOTALL)
+MAX_TOOLS_PER_TURN = 4
 
 
-def extract_tool_calls(text: str) -> list[dict[str, Any]]:
-    """Extract structured tool calls from agent LLM response."""
-    calls: list[dict[str, Any]] = []
+def extract_tool_calls(text: str, max_per_turn: int | None = None) -> list[dict[str, Any]]:
+    """Extract structured, deduplicated tool calls from agent LLM response.
+
+    Filters malformed or empty tool blocks, deduplicates identical calls within the same turn,
+    and optionally caps the number of calls per turn.
+    """
+    raw_calls: list[dict[str, Any]] = []
+
     # 1. Try markdown code block extraction
     for match in _TOOL_CALL_RE.finditer(text):
         try:
             data = json.loads(match.group(1))
-            if isinstance(data, dict) and "tool" in data:
-                calls.append(data)
+            if isinstance(data, dict):
+                raw_calls.append(data)
         except json.JSONDecodeError:
             continue
 
-    if calls:
-        return calls
-
     # 2. Try raw JSON object search if no code blocks matched
-    if '{"tool":' in text or '{"tool" :' in text:
+    if not raw_calls and ('{"tool":' in text or '{"tool" :' in text):
         start = text.find('{"tool"')
         if start != -1:
             try:
-                # Find matching closing brace
                 brace_count = 0
                 end = start
                 for i in range(start, len(text)):
@@ -58,12 +61,45 @@ def extract_tool_calls(text: str) -> list[dict[str, Any]]:
                             end = i + 1
                             break
                 data = json.loads(text[start:end])
-                if isinstance(data, dict) and "tool" in data:
-                    calls.append(data)
+                if isinstance(data, dict):
+                    raw_calls.append(data)
             except json.JSONDecodeError:
                 pass
 
-    return calls
+    # 3. Clean, validate, and deduplicate identical tool+arguments in the same turn
+    validated_calls: list[dict[str, Any]] = []
+    seen_signatures: set[tuple[str, str]] = set()
+
+    for item in raw_calls:
+        tool_name = item.get("tool")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+        tool_name = tool_name.strip()
+        args = item.get("args")
+        if not isinstance(args, dict):
+            args = {}
+
+        try:
+            serialized_args = json.dumps(args, sort_keys=True)
+        except Exception:
+            serialized_args = str(args)
+
+        sig = (tool_name, serialized_args)
+        if sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
+
+        validated_calls.append(
+            {
+                "tool": tool_name,
+                "args": args,
+            }
+        )
+
+    if max_per_turn is not None and len(validated_calls) > max_per_turn:
+        return validated_calls[:max_per_turn]
+
+    return validated_calls
 
 
 class BaseAgent(ABC):
@@ -136,9 +172,12 @@ class BaseAgent(ABC):
 
         step_idx = 0
         final_answer = ""
+        response = None
 
         try:
-            while budget.steps < budget.max_steps:
+            while budget.steps < budget.max_steps and (
+                budget.current_stage is None or budget.stage_steps < budget.stage_max_steps
+            ):
                 budget.record_step()
                 step_idx += 1
                 t0 = time.perf_counter()
@@ -166,20 +205,40 @@ class BaseAgent(ABC):
                 session.add(llm_step)
                 await session.flush()
 
-                tool_calls = extract_tool_calls(response.text)
-                if not tool_calls:
+                # Extract and deduplicate tool calls; cap at 4 per turn
+                all_tools = extract_tool_calls(response.text, max_per_turn=None)
+                if not all_tools:
                     final_answer = response.text
                     break
 
+                tool_calls = all_tools[:MAX_TOOLS_PER_TURN]
+                was_truncated = len(all_tools) > MAX_TOOLS_PER_TURN
+
+                stage_budget_hit = False
                 # Execute requested tools
                 for tc in tool_calls:
-                    budget.record_tool_call()
-                    agent_run.tool_calls += 1
                     t_name = tc.get("tool", "")
                     t_args = tc.get("args", {})
 
+                    can_call = budget.record_tool_call()
+                    if not can_call:
+                        stage_budget_hit = True
+                        break
+
+                    agent_run.tool_calls += 1
+
                     t_start = time.perf_counter()
-                    t_result = await self.registry.execute(t_name, t_args, context, capabilities)
+                    try:
+                        t_result = await self.registry.execute(t_name, t_args, context, capabilities)
+                    except (NotFoundError, PolicyViolationError) as exc:
+                        from app.tools.base import ToolResult
+
+                        t_result = ToolResult.failure(f"Tool error: {exc}", tool=t_name)
+                    except Exception as exc:
+                        logger.error("tool_execution_uncaught_error", tool=t_name, error=str(exc))
+                        from app.tools.base import ToolResult
+
+                        t_result = ToolResult.failure(f"Tool execution failed unexpectedly: {exc}", tool=t_name)
                     t_duration = int((time.perf_counter() - t_start) * 1000)
 
                     tool_exec = ToolExecution(
@@ -221,7 +280,25 @@ class BaseAgent(ABC):
                     messages.append(LLMMessage(role="assistant", content=f"Executed tool {t_name}"))
                     messages.append(LLMMessage(role="user", content=content_str))
 
+                if stage_budget_hit:
+                    messages.append(
+                        LLMMessage(
+                            role="user",
+                            content="[TOOL BUDGET NOTICE: You have reached the tool call limit for this phase. Do not invoke more tools. Synthesize the gathered facts and output your final conclusion now.]",
+                        )
+                    )
+                elif was_truncated:
+                    messages.append(
+                        LLMMessage(
+                            role="user",
+                            content=f"[Notice: Bounded to {MAX_TOOLS_PER_TURN} tool calls for this turn ({len(all_tools) - MAX_TOOLS_PER_TURN} speculative calls omitted). Please evaluate the above results before making further calls.]",
+                        )
+                    )
+
                 await session.flush()
+
+            if not final_answer and response and response.text:
+                final_answer = response.text
 
             agent_run.status = RunStatus.SUCCEEDED
             agent_run.summary = final_answer[:2000]

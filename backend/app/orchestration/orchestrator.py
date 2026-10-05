@@ -6,8 +6,6 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-import difflib
-import re
 from typing import Any
 
 from sqlalchemy import func, select
@@ -27,21 +25,23 @@ from app.models.enums import (
 )
 from app.models.task import Task, TaskEvent
 from app.orchestration.budgets import BudgetTracker
+from app.orchestration.proposal_validator import validate_proposal_before_approval
 from app.orchestration.state_machine import validate_transition
 from app.retrieval.hybrid import HybridRetriever
 from app.tools.base import SandboxExecutor, ToolContext
-from app.tools.permissions import READ_ONLY, permissions_for_status
+from app.tools.permissions import permissions_for_status
 from app.tools.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
-from app.core.paths import safe_join
-from app.orchestration.proposal_validator import validate_proposal_before_approval
-
 
 def extract_or_build_proposal(tool_context: ToolContext, debug_text: str, workspace: Path) -> dict[str, Any] | None:
-    """Extract proposed patch from tool context (propose_patch tool) or parsed diff blocks."""
-    # 1. Multiple or single patches recorded via ProposePatchTool
+    """Extract proposed patch from tool context (propose_patch tool).
+
+    Speculative regex fallbacks that search arbitrary files or parse unstructured
+    LLM prose are disabled for safety and correctness.
+    """
+    # 1. Multiple patches recorded via ProposePatchTool
     patches = getattr(tool_context, "proposed_patches", None)
     if patches and len(patches) > 0:
         files: list[dict[str, Any]] = []
@@ -52,15 +52,18 @@ def extract_or_build_proposal(tool_context: ToolContext, debug_text: str, worksp
                 if p.get("change_type") in ("add", ChangeType.ADD) or p.get("is_new_file")
                 else ChangeType.MODIFY
             )
-            files.append({
-                "path": p["path"],
-                "change_type": change_type,
-                "unified_diff": p.get("unified_diff", ""),
-                "original_content": p.get("original_content"),
-                "proposed_content": p.get("proposed_content"),
-                "old_str": p.get("old_str"),
-                "new_str": p.get("new_str"),
-            })
+            files.append(
+                {
+                    "path": p["path"],
+                    "change_type": change_type,
+                    "unified_diff": p.get("unified_diff", ""),
+                    "original_content": p.get("original_content"),
+                    "proposed_content": p.get("proposed_content"),
+                    "old_str": p.get("old_str"),
+                    "new_str": p.get("new_str"),
+                    "evidence": p.get("evidence", ""),
+                }
+            )
             if p.get("unified_diff"):
                 diffs.append(p["unified_diff"])
         return {
@@ -68,8 +71,10 @@ def extract_or_build_proposal(tool_context: ToolContext, debug_text: str, worksp
             "files": files,
             "unified_diff": "\n".join(diffs),
             "explanation": patches[0].get("explanation") or debug_text[:500],
+            "evidence": patches[0].get("evidence") or "",
         }
 
+    # 2. Single patch recorded via ProposePatchTool
     single_patch = getattr(tool_context, "proposed_patch", None)
     if single_patch:
         change_type = (
@@ -85,87 +90,17 @@ def extract_or_build_proposal(tool_context: ToolContext, debug_text: str, worksp
             "proposed_content": single_patch.get("proposed_content"),
             "old_str": single_patch.get("old_str"),
             "new_str": single_patch.get("new_str"),
+            "evidence": single_patch.get("evidence", ""),
         }
         return {
             "path": single_patch["path"],
             "files": [file_info],
             "unified_diff": single_patch.get("unified_diff", ""),
             "explanation": single_patch.get("explanation") or debug_text[:500],
+            "evidence": single_patch.get("evidence") or "",
         }
 
-    # 2. Check for unified diff block or diff headers
-    diff_block_match = re.search(r"```(?:diff|patch)\s*([\s\S]*?)\s*```", debug_text)
-    block_candidate = diff_block_match.group(1) if diff_block_match else debug_text
-
-    # Check for git unified diff header: --- a/path +++ b/path
-    header_match = re.search(r"---\s+(?:a/)?([^\s\n]+)\s*\n\+\+\+\s+(?:b/)?([^\s\n]+)", block_candidate)
-    if not header_match:
-        header_match = re.search(r"---\s+(?:a/)?([^\s\n]+)\s*\n\+\+\+\s+(?:b/)?([^\s\n]+)", debug_text)
-
-    if header_match:
-        rel_path = header_match.group(2)
-        try:
-            target = safe_join(workspace, rel_path)
-            if target.is_file():
-                content = target.read_text(encoding="utf-8", errors="replace")
-                return {
-                    "path": rel_path,
-                    "files": [{
-                        "path": rel_path,
-                        "change_type": ChangeType.MODIFY,
-                        "unified_diff": block_candidate,
-                        "original_content": content,
-                        "proposed_content": None,
-                    }],
-                    "unified_diff": block_candidate,
-                    "explanation": debug_text[:500],
-                }
-        except Exception:
-            pass
-
-    # 3. Check for - old and + new lines across entire text
-    old_lines: list[str] = []
-    new_lines: list[str] = []
-    for line in debug_text.splitlines():
-        if line.startswith("-") and not line.startswith("---"):
-            old_lines.append(line[1:])
-        elif line.startswith("+") and not line.startswith("+++"):
-            new_lines.append(line[1:])
-
-    if old_lines and new_lines:
-        old_str = "\n".join(old_lines)
-        new_str = "\n".join(new_lines)
-        for py_file in workspace.rglob("*.py"):
-            if py_file.is_file():
-                content = py_file.read_text(encoding="utf-8", errors="replace")
-                if old_str in content:
-                    rel = py_file.relative_to(workspace).as_posix()
-                    new_content = content.replace(old_str, new_str, 1)
-                    udiff = "".join(
-                        difflib.unified_diff(
-                            content.splitlines(keepends=True),
-                            new_content.splitlines(keepends=True),
-                            fromfile=f"a/{rel}",
-                            tofile=f"b/{rel}",
-                        )
-                    )
-                    return {
-                        "path": rel,
-                        "files": [{
-                            "path": rel,
-                            "change_type": ChangeType.MODIFY,
-                            "unified_diff": udiff,
-                            "original_content": content,
-                            "proposed_content": new_content,
-                            "old_str": old_str,
-                            "new_str": new_str,
-                        }],
-                        "unified_diff": udiff,
-                        "explanation": debug_text[:500],
-                    }
-
     return None
-
 
 
 class TaskOrchestrator:
@@ -200,8 +135,20 @@ class TaskOrchestrator:
             res = await self.session.execute(
                 select(func.coalesce(func.max(TaskEvent.seq), 0)).where(TaskEvent.task_id == task.id)
             )
-            self._seq = res.scalar_one()
+            max_db_seq = res.scalar_one() or 0
+            pending_max = max(
+                (obj.seq for obj in self.session.new if isinstance(obj, TaskEvent) and obj.task_id == task.id),
+                default=0,
+            )
+            self._seq = max(max_db_seq, pending_max)
+
         self._seq += 1
+        pending_max = max(
+            (obj.seq for obj in self.session.new if isinstance(obj, TaskEvent) and obj.task_id == task.id),
+            default=0,
+        )
+        if self._seq <= pending_max:
+            self._seq = pending_max + 1
         event = TaskEvent(
             task_id=task.id,
             seq=self._seq,
@@ -241,7 +188,6 @@ class TaskOrchestrator:
         budget = BudgetTracker.from_settings(self.settings)
         retriever = HybridRetriever(repository_id=task.repository_id, session=self.session)
 
-
         async def _tool_notify(ev_type: str, msg: str, data: dict[str, Any] | None) -> None:
             await self.emit_event(task, ev_type, msg, data)
 
@@ -276,16 +222,24 @@ class TaskOrchestrator:
                     rag_snippets.append(
                         f"File: {h.path} (lines {h.start_line}-{h.end_line}, score={h.score:.2f}, reason={h.reason}):\n{h.content}"
                     )
-                    repo_context_data.append({
-                        "path": h.path,
-                        "symbol": h.symbol_name,
-                        "score": round(h.score, 2),
-                        "reason": h.reason or "Relevant to task query",
-                        "lines": f"{h.start_line}-{h.end_line}",
-                    })
+                    repo_context_data.append(
+                        {
+                            "path": h.path,
+                            "symbol": h.symbol_name,
+                            "score": round(h.score, 2),
+                            "reason": h.reason or "Relevant to task query",
+                            "lines": f"{h.start_line}-{h.end_line}",
+                        }
+                    )
             except Exception as e:
                 logger.warning("rag_search_error", error=str(e))
         rag_context_str = "\n\n".join(rag_snippets)
+
+        prev_failure = ""
+        if task.plan and isinstance(task.plan, dict):
+            pf = task.plan.get("previous_failure")
+            if pf:
+                prev_failure = pf.get("reason") or pf.get("exception") or str(pf) if isinstance(pf, dict) else str(pf)
 
         from app.agents.codebase.codebase import CodebaseAgent
         from app.agents.debugger.debugger import DebuggerAgent
@@ -301,6 +255,7 @@ class TaskOrchestrator:
                 )
 
             # 1. PLANNING
+            budget.start_stage("PLANNING", max_steps=4, max_tool_calls=8)
             await self._transition(task, TaskStatus.PLANNING, "Starting planning phase", tool_context)
             planner = PlannerAgent(self.llm, self.registry)
             plan_text = await planner.run(
@@ -309,7 +264,7 @@ class TaskOrchestrator:
                 permissions_for_status(TaskStatus.PLANNING),
                 budget,
                 self.session,
-                extra_context={"rag_context": rag_context_str},
+                extra_context={"rag_context": rag_context_str, "previous_failure": prev_failure},
             )
             current_plan = dict(task.plan) if (task.plan and isinstance(task.plan, dict)) else {}
             current_plan["text"] = plan_text
@@ -317,8 +272,8 @@ class TaskOrchestrator:
             task.plan = current_plan
             await self.emit_event(task, "plan_created", "Plan formulated by Planner agent", {"plan": plan_text[:500]})
 
-
             # 2. ANALYZING
+            budget.start_stage("ANALYZING", max_steps=6, max_tool_calls=12)
             await self._transition(task, TaskStatus.ANALYZING, "Analyzing codebase structure", tool_context)
             codebase = CodebaseAgent(self.llm, self.registry)
             analysis_text = await codebase.run(
@@ -327,12 +282,15 @@ class TaskOrchestrator:
                 permissions_for_status(TaskStatus.ANALYZING),
                 budget,
                 self.session,
-                extra_context={"plan": plan_text, "rag_context": rag_context_str},
+                extra_context={"plan": plan_text, "rag_context": rag_context_str, "previous_failure": prev_failure},
             )
             await self.emit_event(task, "analysis_completed", "Codebase analysis completed")
 
             # 3. INVESTIGATING
-            await self._transition(task, TaskStatus.INVESTIGATING, "Investigating solution and formulating fix", tool_context)
+            budget.start_stage("INVESTIGATING", max_steps=8, max_tool_calls=16)
+            await self._transition(
+                task, TaskStatus.INVESTIGATING, "Investigating solution and formulating fix", tool_context
+            )
             debugger = DebuggerAgent(self.llm, self.registry)
             debug_text = await debugger.run(
                 task,
@@ -340,9 +298,14 @@ class TaskOrchestrator:
                 permissions_for_status(TaskStatus.INVESTIGATING),
                 budget,
                 self.session,
-                extra_context={"code_context": analysis_text, "rag_context": rag_context_str},
+                extra_context={
+                    "code_context": analysis_text,
+                    "rag_context": rag_context_str,
+                    "previous_failure": prev_failure,
+                },
             )
             task.root_cause = {"analysis": debug_text}
+            task.budget_usage = budget.to_dict()
 
             # Question tasks terminate here with findings
             if task.type == TaskType.QUESTION:
@@ -351,62 +314,68 @@ class TaskOrchestrator:
                 return TaskStatus.COMPLETED
 
             # 4. FIX PROPOSED & AWAITING APPROVAL
-            patch_data = extract_or_build_proposal(tool_context, f"{debug_text}\n{task.description or ''}", workspace)
+            patch_data = extract_or_build_proposal(tool_context, debug_text, workspace)
+
             if not patch_data:
-                # Check git_diff fallback
-                diff_res = await self.registry.execute("git_diff", {}, tool_context, READ_ONLY)
-                unified_diff = diff_res.output if diff_res.ok else ""
-                if unified_diff and unified_diff != "(no changes)":
-                    file_matches = re.findall(r"^diff --git a/(.*?) b/(.*?)$", unified_diff, re.MULTILINE)
-                    rel_path = file_matches[0][0] if file_matches else "modified_file"
-                    patch_data = {
-                        "path": rel_path,
-                        "files": [{
-                            "path": rel_path,
-                            "change_type": ChangeType.MODIFY,
-                            "unified_diff": unified_diff,
-                            "original_content": "",
-                            "proposed_content": "",
-                        }],
-                        "old_str": "",
-                        "new_str": "",
-                        "explanation": debug_text[:500],
-                        "unified_diff": unified_diff,
+                if task.type in (TaskType.BUG, TaskType.BUG_FIX):
+                    task.root_cause = {
+                        "outcome": "NO_CONFIRMED_BUG",
+                        "evidence": "No reproducible defect was established from repository evidence. No files were modified.",
+                        "investigation_notes": debug_text,
                     }
+                    task.summary = "NO_CONFIRMED_BUG: No reproducible defect was established from repository evidence. No files were modified."
+                    await self.emit_event(
+                        task,
+                        "no_confirmed_bug",
+                        "No reproducible defect was established from repository evidence. No files were modified.",
+                        {"outcome": "NO_CONFIRMED_BUG", "summary": task.summary},
+                    )
+                    await self._transition(
+                        task, TaskStatus.COMPLETED, "No reproducible defect established", tool_context
+                    )
+                    return TaskStatus.COMPLETED
+                else:
+                    task.summary = debug_text
+                    await self._transition(
+                        task, TaskStatus.COMPLETED, "Investigation completed with recommendations", tool_context
+                    )
+                    return TaskStatus.COMPLETED
 
-            if not patch_data:
-                task.summary = debug_text
-                await self._transition(task, TaskStatus.COMPLETED, "Investigation completed with recommendations", tool_context)
-                return TaskStatus.COMPLETED
-
-            await self._transition(task, TaskStatus.FIX_PROPOSED, "Fix proposed with code diff", tool_context)
-
-            # Validate patch in isolated temporary workspace BEFORE moving to AWAITING_APPROVAL
+            # Validate patch in isolated temporary workspace BEFORE creating any records or moving to FIX_PROPOSED
             is_valid, val_reason = validate_proposal_before_approval(workspace, patch_data)
             if not is_valid:
                 logger.error("proposed_patch_validation_failed", task_id=str(task.id), reason=val_reason)
                 task.error = {"reason": f"Proposed patch failed pre-approval validation: {val_reason}"}
-                task.status = TaskStatus.FAILED
-                tool_context.task_status = TaskStatus.FAILED
+                await self._transition(
+                    task,
+                    TaskStatus.FAILED,
+                    f"Fix proposal rejected by pre-approval validation: {val_reason}",
+                    tool_context,
+                )
                 await self.emit_event(
                     task,
                     "patch_validation_failed",
                     f"Fix proposal rejected by pre-approval validation: {val_reason}",
-                    {"reason": val_reason},
+                    {"new_status": TaskStatus.FAILED.value, "reason": val_reason},
                     level=EventLevel.ERROR,
                 )
                 await self.session.commit()
                 return TaskStatus.FAILED
 
+            # Persist ProposedChange + ChangeFiles FIRST
+            evidence_info = (
+                patch_data.get("evidence") or patch_data.get("explanation") or "Automated fix generated by DevAgent"
+            )
             proposal = ProposedChange(
                 task_id=task.id,
                 iteration=task.iteration,
                 status=ChangeStatus.AWAITING_APPROVAL,
                 summary=task.title,
                 explanation=debug_text[:1000],
-                rationale="Automated fix generated by DevAgent",
+                rationale=str(evidence_info)[:1000],
                 patch_unified=patch_data["unified_diff"],
                 files_changed=len(patch_data.get("files", [patch_data])),
+                root_cause={"evidence": evidence_info, "outcome": "FIX_PROPOSED"},
             )
             self.session.add(proposal)
             await self.session.flush()
@@ -425,6 +394,10 @@ class TaskOrchestrator:
                 self.session.add(change_file)
             await self.session.flush()
 
+            # ONLY THEN transition to FIX_PROPOSED
+            await self._transition(task, TaskStatus.FIX_PROPOSED, "Fix proposed with code diff", tool_context)
+
+            # Persist Approval
             approval = Approval(
                 task_id=task.id,
                 proposed_change_id=proposal.id,
@@ -435,13 +408,29 @@ class TaskOrchestrator:
             self.session.add(approval)
             await self.session.flush()
 
-            await self._transition(task, TaskStatus.AWAITING_APPROVAL, "Changes require user approval before applying", tool_context)
+            # Transition to AWAITING_APPROVAL
+            await self._transition(
+                task, TaskStatus.AWAITING_APPROVAL, "Changes require user approval before applying", tool_context
+            )
             return task.status
 
         except Exception as exc:
             logger.error("task_execution_failed", task_id=str(task.id), error=str(exc))
             task.error = {"exception": str(exc), "type": type(exc).__name__}
             task.status = TaskStatus.FAILED
-            await self.emit_event(task, "task_failed", f"Execution failed: {exc}", level=EventLevel.ERROR)
+            await self.emit_event(
+                task,
+                "status_change",
+                f"Task failed: {exc}",
+                {"new_status": TaskStatus.FAILED.value, "error": str(exc)},
+                level=EventLevel.ERROR,
+            )
+            await self.emit_event(
+                task,
+                "task_failed",
+                f"Execution failed: {exc}",
+                {"new_status": TaskStatus.FAILED.value, "error": str(exc)},
+                level=EventLevel.ERROR,
+            )
             await self.session.commit()
             return TaskStatus.FAILED

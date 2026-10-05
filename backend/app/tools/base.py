@@ -36,7 +36,6 @@ class CodeHit:
     reason: str = ""
 
 
-
 class CodeSearch(Protocol):
     """Retrieval interface injected into tools (implemented by the retriever)."""
 

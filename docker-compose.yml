@@ -30,12 +30,16 @@ services:
       dockerfile: infra/backend.Dockerfile
       target: runtime
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://devagent:devagent@localhost:5432/devagent}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       WORKSPACES_DIR: /data/workspaces
       ARTIFACTS_DIR: /data/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - devagent-data:/data
     ports:
@@ -57,12 +61,16 @@ services:
       target: runtime
     command: ["arq", "app.workers.settings.WorkerSettings"]
     user: root
-    env_file: [.env]
+    env_file:
+      - path: .env
+        required: false
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://devagent:devagent@localhost:5432/devagent}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       WORKSPACES_DIR: /data/workspaces
       ARTIFACTS_DIR: /data/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - devagent-data:/data
       # The docker socket is mounted ONLY here. It is never mounted into the API

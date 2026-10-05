@@ -18,7 +18,31 @@ export const AppContent: React.FC = () => {
   const { isAuthenticated, isLoading } = useAuth();
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const match = window.location.pathname.match(/^\/tasks\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : null;
+  });
+
+  const handleSelectTaskId = useCallback((id: string | null) => {
+    setSelectedTaskId(id);
+    if (typeof window !== 'undefined') {
+      if (id) {
+        window.history.pushState({}, '', `/tasks/${id}`);
+      } else {
+        window.history.pushState({}, '', '/');
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const match = window.location.pathname.match(/^\/tasks\/([a-zA-Z0-9_-]+)/);
+      setSelectedTaskId(match ? match[1] : null);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -50,6 +74,20 @@ export const AppContent: React.FC = () => {
   useEffect(() => {
     refreshData();
   }, [refreshData]);
+
+  // Active task polling: Keep task list continuously refreshed if any task is executing
+  const hasActiveTasks = tasks.some((t) => {
+    const s = (t.status || '').toLowerCase();
+    return ['created', 'planning', 'analyzing', 'investigating', 'applying', 'testing'].includes(s);
+  });
+
+  useEffect(() => {
+    if (!isAuthenticated || !hasActiveTasks) return;
+    const interval = setInterval(() => {
+      refreshData();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, hasActiveTasks, refreshData]);
 
   if (isLoading) {
     return (
@@ -98,8 +136,9 @@ export const AppContent: React.FC = () => {
         <Sidebar
           activeTab={activeTab}
           setActiveTab={(tab) => {
-            setSelectedTaskId(null);
+            handleSelectTaskId(null);
             setActiveTab(tab);
+            refreshData();
           }}
           taskCount={tasks.length}
           repoCount={repositories.length}
@@ -124,7 +163,10 @@ export const AppContent: React.FC = () => {
           {selectedTaskId ? (
             <TaskDetailPage
               taskId={selectedTaskId}
-              onBack={() => setSelectedTaskId(null)}
+              onBack={() => {
+                handleSelectTaskId(null);
+                refreshData();
+              }}
               onTaskUpdated={refreshData}
             />
           ) : activeTab === 'dashboard' ? (
@@ -132,7 +174,7 @@ export const AppContent: React.FC = () => {
             <DashboardPage
               repositories={repositories}
               tasks={tasks}
-              onSelectTask={(id) => setSelectedTaskId(id)}
+              onSelectTask={(id) => handleSelectTaskId(id)}
               onOpenNewTaskModal={() => setIsNewTaskModalOpen(true)}
               onOpenNewRepoModal={() => setIsNewRepoModalOpen(true)}
             />
@@ -146,7 +188,8 @@ export const AppContent: React.FC = () => {
             <TasksPage
               tasks={tasks}
               repositories={repositories}
-              onSelectTask={(id) => setSelectedTaskId(id)}
+              onRefresh={refreshData}
+              onSelectTask={(id) => handleSelectTaskId(id)}
               onOpenNewTaskModal={() => setIsNewTaskModalOpen(true)}
             />
           ) : (
@@ -170,7 +213,7 @@ export const AppContent: React.FC = () => {
         onClose={() => setIsNewTaskModalOpen(false)}
         onTaskCreated={(task) => {
           setTasks((prev) => [task, ...prev]);
-          setSelectedTaskId(task.id);
+          handleSelectTaskId(task.id);
         }}
       />
     </div>

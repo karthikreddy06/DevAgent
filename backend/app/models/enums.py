@@ -17,6 +17,7 @@ class TaskStatus(StrEnum):
     APPLYING = "APPLYING"
     TESTING = "TESTING"
     COMPLETED = "COMPLETED"
+    NO_CONFIRMED_BUG = "NO_CONFIRMED_BUG"
     FAILED = "FAILED"
     REJECTED = "REJECTED"
 
@@ -31,7 +32,6 @@ class TaskType(StrEnum):
     DOCS = "docs"
     QUESTION = "question"
     SECURITY = "security"
-
 
 
 class AgentName(StrEnum):

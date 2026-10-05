@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ListTodo,
   Plus,
@@ -16,6 +16,7 @@ import { Badge } from '../components/Badge';
 interface TasksPageProps {
   tasks: Task[];
   repositories: Repository[];
+  onRefresh?: () => void;
   onSelectTask: (taskId: string) => void;
   onOpenNewTaskModal: () => void;
 }
@@ -23,9 +24,14 @@ interface TasksPageProps {
 export const TasksPage: React.FC<TasksPageProps> = ({
   tasks,
   repositories,
+  onRefresh,
   onSelectTask,
   onOpenNewTaskModal,
 }) => {
+  useEffect(() => {
+    onRefresh?.();
+  }, [onRefresh]);
+
   const [search, setSearch] = useState('');
   const [selectedRepoId, setSelectedRepoId] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');

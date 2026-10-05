@@ -21,7 +21,6 @@ class TaskCreate(BaseModel):
     test_command: str | None = None
 
 
-
 class TaskEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

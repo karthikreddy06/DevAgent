@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import functools
 import secrets
+import urllib.parse
 from pathlib import Path
 from typing import Annotated, Literal
-import urllib.parse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -100,9 +100,9 @@ class Settings(BaseSettings):
     index_max_file_bytes: int = 400_000
 
     # ---------------------------------------------------------------- agents
-    agent_max_steps: int = 12
-    agent_max_tool_calls: int = 24
-    agent_max_tokens: int = 120_000
+    agent_max_steps: int = 18
+    agent_max_tool_calls: int = 36
+    agent_max_tokens: int = 150_000
     agent_timeout_seconds: int = 900
     task_timeout_seconds: int = 900
     max_fix_attempts: int = 3
@@ -132,12 +132,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             val = value.strip()
             while val.startswith("DATABASE_URL="):
-                val = val[len("DATABASE_URL="):].strip()
+                val = val[len("DATABASE_URL=") :].strip()
             val = val.strip("\"'")
             if val.startswith("postgres://"):
-                val = "postgresql+asyncpg://" + val[len("postgres://"):]
+                val = "postgresql+asyncpg://" + val[len("postgres://") :]
             elif val.startswith("postgresql://") and not val.startswith("postgresql+"):
-                val = "postgresql+asyncpg://" + val[len("postgresql://"):]
+                val = "postgresql+asyncpg://" + val[len("postgresql://") :]
             if "://" in val:
                 scheme, rest = val.split("://", 1)
                 if "@" in rest:

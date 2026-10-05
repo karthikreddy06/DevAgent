@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -95,9 +96,9 @@ def test_symlink_and_workspace_containment(tmp_path: Path) -> None:
     try:
         link_to_outside.symlink_to(outside_file)
         from app.core.errors import PolicyViolationError
+
         with pytest.raises(PolicyViolationError):
             ensure_within(workspace, link_to_outside)
     except OSError:
         # On Windows without developer mode/admin symlink creation may require privilege, skip if OS denies symlink creation
         pass
-

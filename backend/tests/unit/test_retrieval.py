@@ -64,4 +64,3 @@ def test_binary_suffixes_ignored() -> None:
     matcher = IgnoreMatcher()
     assert matcher.is_ignored("models/classifier.pkl") is True
     assert matcher.is_ignored("src/script.py") is False
-

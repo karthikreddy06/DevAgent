@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.errors import NotFoundError, PolicyViolationError
+from app.core.errors import NotFoundError, PolicyViolationError, ValidationError
 from app.core.logging import get_logger
 from app.models.change import Approval, ChangeFile, ProposedChange
 from app.models.enums import ApprovalDecision, ChangeStatus, TaskStatus
@@ -81,21 +81,50 @@ class ChangeService:
         if approval.decision is not None:
             raise PolicyViolationError("Approval has already been decided")
 
-        approval.decision = decision
-        approval.decided_by_id = decided_by.id
-        approval.decided_at = datetime.now(UTC)
-        approval.reason = notes
-
-        # Update associated proposed change if linked
+        # Invariant checks for approval decision
         change = None
-        if approval.proposed_change_id:
+        if decision == ApprovalDecision.APPROVED:
+            if not approval.proposed_change_id:
+                raise ValidationError("Approval record has no associated proposed_change_id")
+
             c_stmt = select(ProposedChange).where(ProposedChange.id == approval.proposed_change_id)
             c_res = await self.session.execute(c_stmt)
             change = c_res.scalar_one_or_none()
-            if change:
-                if decision == ApprovalDecision.APPROVED:
-                    change.status = ChangeStatus.APPROVED
-                elif decision == ApprovalDecision.REJECTED:
+            if not change:
+                raise NotFoundError("Proposed change associated with approval not found")
+
+            if not change.patch_unified or not change.patch_unified.strip():
+                raise ValidationError("ProposedChange contains no valid unified diff patch")
+
+            cf_stmt = select(ChangeFile).where(ChangeFile.proposed_change_id == change.id)
+            cf_res = await self.session.execute(cf_stmt)
+            change_files = cf_res.scalars().all()
+            if not change_files:
+                raise ValidationError("ProposedChange has no associated ChangeFile records")
+
+            has_actual_change = any(
+                cf.proposed_content is not None or (cf.diff and cf.diff.strip()) for cf in change_files
+            )
+            if not has_actual_change:
+                raise ValidationError("ProposedChange files represent no actual code change")
+
+            approval.decision = decision
+            approval.decided_by_id = decided_by.id
+            approval.decided_at = datetime.now(UTC)
+            approval.reason = notes
+            change.status = ChangeStatus.APPROVED
+
+        elif decision == ApprovalDecision.REJECTED:
+            approval.decision = decision
+            approval.decided_by_id = decided_by.id
+            approval.decided_at = datetime.now(UTC)
+            approval.reason = notes
+
+            if approval.proposed_change_id:
+                c_stmt = select(ProposedChange).where(ProposedChange.id == approval.proposed_change_id)
+                c_res = await self.session.execute(c_stmt)
+                change = c_res.scalar_one_or_none()
+                if change:
                     change.status = ChangeStatus.REJECTED
 
         # Update task status based on decision

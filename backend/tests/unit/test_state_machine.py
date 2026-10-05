@@ -32,3 +32,15 @@ def test_invalid_transitions() -> None:
     assert can_transition(TaskStatus.COMPLETED, TaskStatus.PLANNING) is False
     with pytest.raises(InvalidStateTransitionError):
         validate_transition(TaskStatus.COMPLETED, TaskStatus.PLANNING)
+
+
+@pytest.mark.unit
+def test_failed_retry_transitions() -> None:
+    # FAILED tasks can transition to CREATED or PLANNING for retry
+    assert can_transition(TaskStatus.FAILED, TaskStatus.CREATED) is True
+    assert can_transition(TaskStatus.FAILED, TaskStatus.PLANNING) is True
+    # FAILED tasks cannot jump directly to COMPLETED or APPLYING
+    assert can_transition(TaskStatus.FAILED, TaskStatus.COMPLETED) is False
+    assert can_transition(TaskStatus.FAILED, TaskStatus.APPLYING) is False
+    with pytest.raises(InvalidStateTransitionError):
+        validate_transition(TaskStatus.FAILED, TaskStatus.COMPLETED)

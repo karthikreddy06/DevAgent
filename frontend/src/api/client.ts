@@ -263,6 +263,19 @@ class ApiClient {
     );
   }
 
+  async retryTask(id: string, wait: boolean = false): Promise<Task> {
+    return this.request<Task>(
+      `/v1/tasks/${id}/retry?wait=${wait}`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async listTaskEvents(taskId: string): Promise<TaskEvent[]> {
+    return this.request<TaskEvent[]>(`/v1/tasks/${taskId}/events`);
+  }
+
   // ============================================================
   // SSE Stream for Task Events
   // ============================================================
@@ -275,30 +288,38 @@ class ApiClient {
     const token = this.getToken();
 
     const url =
-      `${API_BASE}/v1/tasks/${taskId}/events` +
+      `${API_BASE}/v1/tasks/${taskId}/events/stream` +
       (token
         ? `?token=${encodeURIComponent(token)}`
         : '');
 
     const eventSource = new EventSource(url);
 
-    eventSource.onmessage = (e) => {
+    const handleMessage = (e: MessageEvent) => {
       try {
         const parsed = JSON.parse(e.data);
-        onEvent(parsed);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.event_type === 'stream_done') {
+            eventSource.close();
+            return;
+          }
+          onEvent(parsed);
+        }
       } catch (err) {
-        console.error(
-          'Failed to parse SSE event',
-          err
-        );
+        console.error('Failed to parse SSE event', err);
       }
     };
+
+    eventSource.onmessage = handleMessage;
+    eventSource.addEventListener('task_event', handleMessage as EventListener);
+    eventSource.addEventListener('done', () => {
+      eventSource.close();
+    });
 
     eventSource.onerror = (err) => {
       if (onError) {
         onError(err);
       }
-
       eventSource.close();
     };
 

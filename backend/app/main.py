@@ -25,6 +25,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.ensure_directories()
     logger.info("app_started", app_name=settings.app_name, env=settings.env)
     yield
+    from app.database.session import dispose_engine
+
+    await dispose_engine()
     logger.info("app_stopped")
 
 

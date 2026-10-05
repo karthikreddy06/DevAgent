@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 import uuid
@@ -94,7 +95,7 @@ class TestService:
         task_in_db = await self.session.get(Task, task_id)
         if task_in_db is not None:
             self.session.add(test_run)
-            try:
+            with contextlib.suppress(Exception):
                 from app.models.enums import AgentName
                 from app.models.sandbox import SandboxRun
 
@@ -114,8 +115,6 @@ class TestService:
                     stderr_ref=(output.stderr or "")[:1000],
                 )
                 self.session.add(sandbox_run)
-            except Exception:
-                pass
 
             await self.session.commit()
             await self.session.refresh(test_run)

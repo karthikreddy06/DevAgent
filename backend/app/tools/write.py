@@ -118,9 +118,14 @@ class ApplyPatchTool(Tool):
 
 class ProposePatchArgs(BaseModel):
     path: str = Field(description="Relative file path inside the repository workspace to modify or create")
-    old_str: str = Field(default="", description="Exact snippet of code to be replaced, or empty string if creating a new file")
+    old_str: str = Field(
+        default="", description="Exact snippet of code to be replaced, or empty string if creating a new file"
+    )
     new_str: str = Field(description="New snippet of code to insert in place of old_str, or full content of new file")
     explanation: str = Field(default="", description="Explanation of why this change fixes the issue")
+    evidence: str = Field(
+        default="", description="Concrete evidence, test reproduction, or observed defect in code demonstrating the bug"
+    )
     is_new_file: bool = Field(default=False, description="True if proposing to add a brand new file")
 
 
@@ -192,6 +197,7 @@ class ProposePatchTool(Tool):
             "old_str": args.old_str,
             "new_str": args.new_str,
             "explanation": args.explanation,
+            "evidence": args.evidence or args.explanation,
             "unified_diff": unified_diff,
             "original_content": content if not is_new else None,
             "proposed_content": new_content,
@@ -215,4 +221,3 @@ class ProposePatchTool(Tool):
             path=args.path,
             diff=unified_diff,
         )
-

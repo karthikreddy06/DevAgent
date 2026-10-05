@@ -13,7 +13,7 @@ from app.retrieval.indexing import RepoIndexer
 from app.services.repo_service import RepoService
 
 logger = get_logger(__name__)
-   
+
 
 async def index_repository_job(ctx: dict[str, Any], repository_id: str) -> int:
     """Arq background job executing full repository indexing."""

@@ -42,9 +42,7 @@ class TestDockerSandbox:
     async def test_sandbox_executes_harmless_command(self, workspace: Path, test_settings: Settings) -> None:
         script = workspace / "test_ok.py"
         script.write_text(
-            "import sys\n"
-            "print('SANDBOX_OK')\n"
-            "sys.stderr.write('SANDBOX_STDERR\\n')\n",
+            "import sys\nprint('SANDBOX_OK')\nsys.stderr.write('SANDBOX_STDERR\\n')\n",
             encoding="utf-8",
         )
         task_id = str(uuid.uuid4())
@@ -95,8 +93,7 @@ class TestDockerSandbox:
     async def test_sandbox_has_no_network_access(self, workspace: Path, test_settings: Settings) -> None:
         script = workspace / "test_net.py"
         script.write_text(
-            "import urllib.request\n"
-            "urllib.request.urlopen('http://1.1.1.1', timeout=2)\n",
+            "import urllib.request\nurllib.request.urlopen('http://1.1.1.1', timeout=2)\n",
             encoding="utf-8",
         )
         task_id = str(uuid.uuid4())
@@ -119,8 +116,7 @@ class TestDockerSandbox:
     async def test_sandbox_does_not_leak_host_environment(self, workspace: Path, test_settings: Settings) -> None:
         script = workspace / "test_env.py"
         script.write_text(
-            "import os\n"
-            "print('ENV_KEYS:', ','.join(os.environ.keys()))\n",
+            "import os\nprint('ENV_KEYS:', ','.join(os.environ.keys()))\n",
             encoding="utf-8",
         )
         task_id = str(uuid.uuid4())

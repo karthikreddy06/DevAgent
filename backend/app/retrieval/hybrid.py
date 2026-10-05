@@ -221,7 +221,9 @@ class HybridRetriever(CodeSearch):
                         end_line=chunk.end_line,
                         score=1.0,
                         content=chunk.content,
-                        chunk_type=str(chunk.chunk_type.value if hasattr(chunk.chunk_type, "value") else chunk.chunk_type),
+                        chunk_type=str(
+                            chunk.chunk_type.value if hasattr(chunk.chunk_type, "value") else chunk.chunk_type
+                        ),
                         symbol_name=chunk.symbol_name,
                         language=chunk.language,
                         source="target_file",
@@ -233,8 +235,24 @@ class HybridRetriever(CodeSearch):
         identifiers = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", combined_text)
         # Filter out common English stop words
         common_words = {
-            "the", "and", "for", "with", "that", "this", "from", "when", "into",
-            "task", "test", "issue", "bug", "code", "file", "fix", "update", "create"
+            "the",
+            "and",
+            "for",
+            "with",
+            "that",
+            "this",
+            "from",
+            "when",
+            "into",
+            "task",
+            "test",
+            "issue",
+            "bug",
+            "code",
+            "file",
+            "fix",
+            "update",
+            "create",
         }
         candidate_symbols = [w for w in set(identifiers) if w.lower() not in common_words][:5]
         for sym in candidate_symbols:
@@ -271,4 +289,3 @@ class HybridRetriever(CodeSearch):
         # Sort by score descending and return top_k
         ranked = sorted(collected.values(), key=lambda x: x.score, reverse=True)
         return ranked[:top_k]
-
