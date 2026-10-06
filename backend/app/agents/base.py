@@ -17,7 +17,7 @@ from app.models.agent import AgentRun, AgentStep, ToolExecution
 from app.models.enums import AgentName, RunStatus, StepKind
 from app.models.task import Task
 from app.orchestration.budgets import BudgetTracker
-from app.tools.base import ToolContext
+from app.tools.base import ToolContext, ToolResult
 from app.tools.permissions import PermissionSet
 from app.tools.registry import ToolRegistry
 
@@ -46,9 +46,9 @@ def extract_tool_calls(text: str, max_per_turn: int | None = None) -> list[dict[
             continue
 
     # 2. Try raw JSON object search if no code blocks matched
-    if not raw_calls and ('{"tool":' in text or '{"tool" :' in text):
-        start = text.find('{"tool"')
-        if start != -1:
+    if not raw_calls:
+        for match in re.finditer(r"\{\s*\"tool\"\s*:", text):
+            start = match.start()
             try:
                 brace_count = 0
                 end = start
@@ -76,8 +76,14 @@ def extract_tool_calls(text: str, max_per_turn: int | None = None) -> list[dict[
             continue
         tool_name = tool_name.strip()
         args = item.get("args")
-        if not isinstance(args, dict):
-            args = {}
+        if isinstance(args, dict) and args:
+            pass
+        else:
+            remaining = {k: v for k, v in item.items() if k not in ("tool", "args")}
+            if remaining:
+                args = remaining
+            elif not isinstance(args, dict):
+                args = {}
 
         try:
             serialized_args = json.dumps(args, sort_keys=True)
@@ -115,6 +121,28 @@ class BaseAgent(ABC):
     @abstractmethod
     def build_initial_prompt(self, task: Task, extra_context: dict[str, Any] | None = None) -> str:
         """Construct the user prompt describing the agent's specific mission."""
+
+    def get_recovery_prompt(
+        self,
+        task: Task,
+        context: ToolContext,
+        response_text: str,
+        extra_context: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Hook for sub-agents to trigger a single recovery turn if needed."""
+        return None
+
+    def get_tool_error_correction_prompt(
+        self,
+        task: Task,
+        context: ToolContext,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        tool_result: ToolResult,
+        extra_context: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Hook for specialized agents to provide targeted correction prompts when a tool fails."""
+        return None
 
     def format_tools_catalog(self, capabilities: PermissionSet) -> str:
         catalogue = self.registry.catalogue(capabilities)
@@ -173,6 +201,7 @@ class BaseAgent(ABC):
         step_idx = 0
         final_answer = ""
         response = None
+        recovery_attempted = False
 
         try:
             while budget.steps < budget.max_steps and (
@@ -208,6 +237,13 @@ class BaseAgent(ABC):
                 # Extract and deduplicate tool calls; cap at 4 per turn
                 all_tools = extract_tool_calls(response.text, max_per_turn=None)
                 if not all_tools:
+                    recovery_prompt = self.get_recovery_prompt(task, context, response.text, extra_context)
+                    if recovery_prompt and not recovery_attempted:
+                        recovery_attempted = True
+                        messages.append(LLMMessage(role="assistant", content=response.text))
+                        messages.append(LLMMessage(role="user", content=recovery_prompt))
+                        continue
+
                     final_answer = response.text
                     break
 
@@ -272,11 +308,20 @@ class BaseAgent(ABC):
                     step_idx += 1
 
                     # Append tool result to dialogue
-                    content_str = (
-                        f"TOOL RESULT ({t_name}):\n{t_result.output}"
-                        if t_result.ok
-                        else f"TOOL ERROR ({t_name}):\n{t_result.error}"
-                    )
+                    if not t_result.ok:
+                        correction = self.get_tool_error_correction_prompt(
+                            task, context, t_name, t_args, t_result, extra_context
+                        )
+                        if correction:
+                            content_str = (
+                                f"TOOL ERROR ({t_name}):\n{t_result.error}\n\n"
+                                f"CORRECTION REQUIRED:\n{correction}"
+                            )
+                        else:
+                            content_str = f"TOOL ERROR ({t_name}):\n{t_result.error}"
+                    else:
+                        content_str = f"TOOL RESULT ({t_name}):\n{t_result.output}"
+
                     messages.append(LLMMessage(role="assistant", content=f"Executed tool {t_name}"))
                     messages.append(LLMMessage(role="user", content=content_str))
 

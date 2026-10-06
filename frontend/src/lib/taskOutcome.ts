@@ -1,5 +1,6 @@
 export type AuthoritativeOutcome =
   | 'NO_CONFIRMED_BUG'
+  | 'BUG_CONFIRMED_BUT_PROPOSAL_FAILED'
   | 'FIXED_AND_VERIFIED'
   | 'AWAITING_APPROVAL'
   | 'FAILED'
@@ -80,6 +81,38 @@ export function resolveAuthoritativeOutcome(
       shouldShowGitBranch: false,
       explanation:
         'DevAgent thoroughly examined the repository and determined that no reproducible software defect exists based on repository evidence.',
+      filesModifiedCount: 0,
+      patchesGeneratedCount: 0,
+      approvalsRequestedCount: 0,
+    };
+  }
+
+  // 1b. BUG_CONFIRMED_BUT_PROPOSAL_FAILED
+  const isProposalFailed =
+    statusUpper === 'BUG_CONFIRMED_BUT_PROPOSAL_FAILED' ||
+    rootCauseOutcome === 'BUG_CONFIRMED_BUT_PROPOSAL_FAILED' ||
+    summaryStr.startsWith('BUG_CONFIRMED_BUT_PROPOSAL_FAILED');
+
+  if (isProposalFailed) {
+    return {
+      outcome: 'BUG_CONFIRMED_BUT_PROPOSAL_FAILED',
+      isNoConfirmedBug: false,
+      isFixedAndVerified: false,
+      isFailed: true,
+      isAwaitingApproval: false,
+      isRejected: false,
+      isActive: false,
+      isCreated: false,
+      shouldShowDiagnosis: false,
+      shouldShowProposedChange: false,
+      shouldShowVerificationSteps: false,
+      shouldShowSummary: true,
+      shouldShowGitBranch: false,
+      explanation: String(
+        task.error?.reason ||
+          task.summary ||
+          'Defect confirmed from repository evidence, but structured proposal generation failed.'
+      ),
       filesModifiedCount: 0,
       patchesGeneratedCount: 0,
       approvalsRequestedCount: 0,

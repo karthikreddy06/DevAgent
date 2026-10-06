@@ -291,6 +291,14 @@ class TaskOrchestrator:
             await self._transition(
                 task, TaskStatus.INVESTIGATING, "Investigating solution and formulating fix", tool_context
             )
+
+            # Automated reproduction before running Debugger
+            repro_test_run = None
+            repro_text = ""
+            repro_result_dict = None
+            if task.type in (TaskType.BUG, TaskType.BUG_FIX):
+                repro_test_run, repro_result_dict, repro_text = await self._run_reproduction(task, workspace)
+
             debugger = DebuggerAgent(self.llm, self.registry)
             debug_text = await debugger.run(
                 task,
@@ -301,6 +309,9 @@ class TaskOrchestrator:
                 extra_context={
                     "code_context": analysis_text,
                     "rag_context": rag_context_str,
+                    "repository_context": repo_context_data,
+                    "test_failures": repro_text,
+                    "reproduction": repro_result_dict,
                     "previous_failure": prev_failure,
                 },
             )
@@ -317,23 +328,62 @@ class TaskOrchestrator:
             patch_data = extract_or_build_proposal(tool_context, debug_text, workspace)
 
             if not patch_data:
+                defect_confirmed, defect_evidence = self._classify_defect(debug_text, repro_test_run)
+
                 if task.type in (TaskType.BUG, TaskType.BUG_FIX):
-                    task.root_cause = {
-                        "outcome": "NO_CONFIRMED_BUG",
-                        "evidence": "No reproducible defect was established from repository evidence. No files were modified.",
-                        "investigation_notes": debug_text,
-                    }
-                    task.summary = "NO_CONFIRMED_BUG: No reproducible defect was established from repository evidence. No files were modified."
-                    await self.emit_event(
-                        task,
-                        "no_confirmed_bug",
-                        "No reproducible defect was established from repository evidence. No files were modified.",
-                        {"outcome": "NO_CONFIRMED_BUG", "summary": task.summary},
-                    )
-                    await self._transition(
-                        task, TaskStatus.COMPLETED, "No reproducible defect established", tool_context
-                    )
-                    return TaskStatus.COMPLETED
+                    if defect_confirmed:
+                        fail_reason = (
+                            "Agent confirmed defect but failed to produce a valid structured patch proposal."
+                        )
+                        task.root_cause = {
+                            "outcome": "BUG_CONFIRMED_BUT_PROPOSAL_FAILED",
+                            "evidence": defect_evidence,
+                            "reason": fail_reason,
+                            "investigation_notes": debug_text,
+                        }
+                        task.summary = (
+                            f"BUG_CONFIRMED_BUT_PROPOSAL_FAILED: {defect_evidence}. {fail_reason}"
+                        )
+                        task.error = {
+                            "reason": fail_reason,
+                            "outcome": "BUG_CONFIRMED_BUT_PROPOSAL_FAILED",
+                            "evidence": defect_evidence,
+                        }
+                        await self.emit_event(
+                            task,
+                            "proposal_generation_failed",
+                            f"Defect confirmed but structured proposal generation failed: {defect_evidence}",
+                            {
+                                "outcome": "BUG_CONFIRMED_BUT_PROPOSAL_FAILED",
+                                "evidence": defect_evidence,
+                                "summary": task.summary,
+                            },
+                            level=EventLevel.ERROR,
+                        )
+                        await self._transition(
+                            task,
+                            TaskStatus.FAILED,
+                            "Defect confirmed but proposal generation failed",
+                            tool_context,
+                        )
+                        return TaskStatus.FAILED
+                    else:
+                        task.root_cause = {
+                            "outcome": "NO_CONFIRMED_BUG",
+                            "evidence": "No reproducible defect was established from repository evidence. No files were modified.",
+                            "investigation_notes": debug_text,
+                        }
+                        task.summary = "NO_CONFIRMED_BUG: No reproducible defect was established from repository evidence. No files were modified."
+                        await self.emit_event(
+                            task,
+                            "no_confirmed_bug",
+                            "No reproducible defect was established from repository evidence. No files were modified.",
+                            {"outcome": "NO_CONFIRMED_BUG", "summary": task.summary},
+                        )
+                        await self._transition(
+                            task, TaskStatus.COMPLETED, "No reproducible defect established", tool_context
+                        )
+                        return TaskStatus.COMPLETED
                 else:
                     task.summary = debug_text
                     await self._transition(
@@ -434,3 +484,98 @@ class TaskOrchestrator:
             )
             await self.session.commit()
             return TaskStatus.FAILED
+
+    async def _run_reproduction(
+        self,
+        task: Task,
+        workspace: Path,
+    ) -> tuple[Any, dict[str, Any] | None, str]:
+        """Execute automated test reproduction in sandbox if configured/available."""
+        user_test_cmd = None
+        if task.plan and isinstance(task.plan, dict):
+            user_test_cmd = task.plan.get("test_command")
+
+        test_cmd: list[str] | None = None
+        if user_test_cmd:
+            import shlex
+
+            parsed = shlex.split(user_test_cmd)
+            test_cmd = parsed if parsed else ["pytest"]
+        elif await asyncio.to_thread(
+            lambda: (workspace / "test_app.py").is_file()
+            or (workspace / "tests").is_dir()
+            or any(workspace.glob("test_*.py"))
+            or any(workspace.glob("*_test.py"))
+        ):
+            test_cmd = ["pytest"]
+
+        if not test_cmd or self.sandbox is None:
+            return None, None, ""
+
+        try:
+            from app.services.test_service import TestService
+
+            test_service = TestService(self.session, self.settings)
+            test_run = await test_service.run_tests(
+                task.id,
+                test_cmd,
+                self.sandbox,
+                iteration=task.iteration,
+                phase="reproduction",
+            )
+            stdout_str = test_run.stdout_tail or ""
+            stderr_str = test_run.stderr_tail or ""
+            repro_output = f"{stdout_str}\n{stderr_str}".strip()
+
+            repro_dict = {
+                "command": test_cmd,
+                "exit_code": test_run.exit_code,
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "duration_ms": test_run.duration_ms,
+                "summary": test_run.summary,
+                "all_passed": test_run.all_passed,
+                "passed": test_run.passed,
+                "failed": test_run.failed,
+                "errors": test_run.errors,
+            }
+
+            repro_text = (
+                f"REPRODUCTION COMMAND: {' '.join(test_cmd)}\n"
+                f"EXIT CODE: {test_run.exit_code}\n"
+                f"TEST SUMMARY: {test_run.summary}\n"
+                f"OUTPUT:\n{repro_output}"
+            )
+
+            await self.emit_event(
+                task,
+                "test_reproduction",
+                f"Reproduction command '{' '.join(test_cmd)}' completed: {test_run.summary} (exit {test_run.exit_code})",
+                repro_dict,
+                level=EventLevel.WARNING if not test_run.all_passed else EventLevel.INFO,
+            )
+            return test_run, repro_dict, repro_text
+        except Exception as exc:
+            logger.warning("reproduction_execution_failed", error=str(exc))
+            return None, None, ""
+
+    def _classify_defect(
+        self,
+        debug_text: str,
+        repro_test_run: Any,
+    ) -> tuple[bool, str]:
+        """Classify whether the investigation established a confirmed defect."""
+        if repro_test_run is not None and not repro_test_run.all_passed:
+            evidence = (
+                f"Reproduction test failed with exit code {repro_test_run.exit_code}: "
+                f"{repro_test_run.summary}"
+            )
+            return True, evidence
+
+        from app.agents.debugger.debugger import detects_concrete_defect
+
+        if detects_concrete_defect(debug_text):
+            evidence = "Defect identified and confirmed through repository code analysis."
+            return True, evidence
+
+        return False, "No reproducible defect was established from repository evidence."
