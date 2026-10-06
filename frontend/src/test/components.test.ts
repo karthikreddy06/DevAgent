@@ -420,4 +420,78 @@ describe('Authoritative Task Outcome Resolution & Contradiction Suppression', ()
   });
 });
 
+describe('Repository schema & Git URL derivation', () => {
+  it('correctly parses GitHub owner and repo name from various Git URL formats', async () => {
+    const { parseGitUrl } = await import('../components/NewRepoModal');
+
+    // HTTPS with .git
+    expect(parseGitUrl('https://github.com/karthikreddy06/devagent-bug-test.git')).toEqual({
+      owner: 'karthikreddy06',
+      name: 'devagent-bug-test',
+    });
+
+    // HTTPS without .git
+    expect(parseGitUrl('https://github.com/karthikreddy06/devagent-bug-test')).toEqual({
+      owner: 'karthikreddy06',
+      name: 'devagent-bug-test',
+    });
+
+    // HTTPS with trailing slash
+    expect(parseGitUrl('https://github.com/karthikreddy06/devagent-bug-test/')).toEqual({
+      owner: 'karthikreddy06',
+      name: 'devagent-bug-test',
+    });
+
+    // SSH format
+    expect(parseGitUrl('git@github.com:karthikreddy06/devagent-bug-test.git')).toEqual({
+      owner: 'karthikreddy06',
+      name: 'devagent-bug-test',
+    });
+
+    // Empty / invalid
+    expect(parseGitUrl('')).toEqual({});
+  });
+
+  it('correctly aligns RepositoryCreate payload with full_name and owner', async () => {
+    let capturedBody: any;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (_url: RequestInfo | URL, options?: RequestInit) => {
+      capturedBody = JSON.parse(options?.body as string);
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({
+          id: 'repo-uuid-test',
+          name: capturedBody.name,
+          full_name: capturedBody.full_name,
+          owner: capturedBody.owner,
+          owner_id: 'user-uuid-123',
+          source_type: 'git_url',
+          clone_status: 'READY',
+          index_status: 'NOT_INDEXED',
+          indexed_files: 0,
+          indexed_chunks: 0,
+          size_kb: 0,
+          default_branch: 'main',
+          created_at: new Date().toISOString(),
+        }),
+      } as Response;
+    }) as typeof fetch;
+
+    const res = await api.createRepository({
+      name: 'devagent-bug-test',
+      owner: 'karthikreddy06',
+      full_name: 'karthikreddy06/devagent-bug-test',
+      source_url: 'https://github.com/karthikreddy06/devagent-bug-test',
+      default_branch: 'main',
+    });
+
+    expect(capturedBody.name).toBe('devagent-bug-test');
+    expect(capturedBody.owner).toBe('karthikreddy06');
+    expect(capturedBody.full_name).toBe('karthikreddy06/devagent-bug-test');
+    expect(res.owner_id).toBe('user-uuid-123');
+    expect(res.full_name).toBe('karthikreddy06/devagent-bug-test');
+  });
+});
+
+
 

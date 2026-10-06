@@ -32,6 +32,10 @@ async def index_repository_job(ctx: dict[str, Any], repository_id: str) -> int:
             embedder = None
 
         indexer = RepoIndexer(session=session, embedding_provider=embedder, settings=settings)
-        chunks_indexed = await indexer.index_repository(repo, workspace)
-        logger.info("index_repo_job_completed", repo_id=repository_id, chunks=chunks_indexed)
-        return chunks_indexed
+        try:
+            chunks_indexed = await indexer.index_repository(repo, workspace)
+            logger.info("index_repo_job_completed", repo_id=repository_id, chunks=chunks_indexed)
+            return chunks_indexed
+        except Exception as exc:
+            logger.error("index_repo_job_failed", repo_id=repository_id, error=str(exc))
+            raise

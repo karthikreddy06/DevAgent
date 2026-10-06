@@ -25,7 +25,9 @@ export interface Repository {
   git_url?: string;
   default_branch: string;
   clone_status?: string;
+  clone_error?: string | null;
   index_status?: string;
+  index_error?: string | null;
   analysis_status?: string;
   is_indexed?: boolean;
   indexed_files: number;
@@ -38,7 +40,8 @@ export interface Repository {
 
 export interface RepositoryCreate {
   name: string;
-  owner: string;
+  owner?: string;
+  full_name?: string;
   local_path?: string;
   source_url?: string;
   default_branch?: string;

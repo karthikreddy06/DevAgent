@@ -9,6 +9,16 @@ interface NewRepoModalProps {
   onRepoCreated: (repo: Repository) => void;
 }
 
+export function parseGitUrl(url: string): { owner?: string; name?: string } {
+  if (!url) return {};
+  const clean = url.trim().replace(/\.git$/, '').replace(/\/$/, '');
+  const match = clean.match(/(?:[:/])([^/:]+)\/([^/:]+)$/);
+  if (match) {
+    return { owner: match[1], name: match[2] };
+  }
+  return {};
+}
+
 export const NewRepoModal: React.FC<NewRepoModalProps> = ({
   isOpen,
   onClose,
@@ -22,21 +32,47 @@ export const NewRepoModal: React.FC<NewRepoModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const handleGitUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setGitUrl(val);
+    const parsed = parseGitUrl(val);
+    if (parsed.owner && !owner) {
+      setOwner(parsed.owner);
+    }
+    if (parsed.name && !name) {
+      setName(parsed.name);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name || !owner) {
-      setError('Name and Owner are required');
+    const derived = parseGitUrl(gitUrl);
+    const effectiveName = (name || derived.name || '').trim();
+    const effectiveOwner = (owner || derived.owner || '').trim();
+
+    if (!effectiveName) {
+      setError('Repository Name is required');
       return;
     }
+
+    if (!gitUrl && !localPath) {
+      setError('Either Remote Git URL or Local Filesystem Path is required');
+      return;
+    }
+
+    const full_name = effectiveOwner ? `${effectiveOwner}/${effectiveName}` : undefined;
+
     setLoading(true);
     setError(null);
-                                                                                                                                                                                                        try {
+
+    try {
       const repo = await api.createRepository({
-        name,
-        owner,
-        local_path: localPath || undefined,
-        source_url: gitUrl || undefined,
-        default_branch: defaultBranch || 'main',
+        name: effectiveName,
+        owner: effectiveOwner || undefined,
+        full_name,
+        local_path: localPath.trim() || undefined,
+        source_url: gitUrl.trim() || undefined,
+        default_branch: defaultBranch.trim() || 'main',
       });
       onRepoCreated(repo);
       onClose();
@@ -45,6 +81,7 @@ export const NewRepoModal: React.FC<NewRepoModalProps> = ({
       setOwner('');
       setLocalPath('');
       setGitUrl('');
+      setDefaultBranch('main');
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message);
@@ -94,6 +131,22 @@ export const NewRepoModal: React.FC<NewRepoModalProps> = ({
 
         <div>
           <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+            Remote Git URL (e.g. GitHub)
+          </label>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="https://github.com/acme/auth-service.git"
+            value={gitUrl}
+            onChange={handleGitUrlChange}
+          />
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
+            Auto-derives repository name and owner/org namespace
+          </span>
+        </div>
+
+        <div>
+          <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
             Repository Name *
           </label>
           <input
@@ -108,16 +161,18 @@ export const NewRepoModal: React.FC<NewRepoModalProps> = ({
 
         <div>
           <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-            Owner / Organization *
+            Owner / Organization
           </label>
           <input
             type="text"
-            required
             className="input-field"
             placeholder="e.g. acme-corp"
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
           />
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
+            GitHub owner or organization namespace (e.g. github.com/owner/repo)
+          </span>
         </div>
 
         <div>
@@ -134,19 +189,6 @@ export const NewRepoModal: React.FC<NewRepoModalProps> = ({
           <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
             Used for local sandbox mount during development
           </span>
-        </div>
-
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-            Remote Git URL (Optional)
-          </label>
-          <input
-            type="text"
-            className="input-field"
-            placeholder="https://github.com/acme/auth-service.git"
-            value={gitUrl}
-            onChange={(e) => setGitUrl(e.target.value)}
-          />
         </div>
 
         <div>

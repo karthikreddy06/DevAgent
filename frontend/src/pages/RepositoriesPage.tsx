@@ -165,8 +165,20 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
                     </div>
                   </div>
 
-                  <Badge status={(repo.index_status === 'INDEXED' || repo.is_indexed) ? 'completed' : 'queued'}>
-                    {(repo.index_status === 'INDEXED' || repo.is_indexed) ? 'Indexed' : 'Unindexed'}
+                  <Badge
+                    status={
+                      (repo.index_status === 'INDEXED' || repo.is_indexed)
+                        ? 'completed'
+                        : repo.index_status === 'FAILED'
+                        ? 'failed'
+                        : 'queued'
+                    }
+                  >
+                    {(repo.index_status === 'INDEXED' || repo.is_indexed)
+                      ? 'Indexed'
+                      : repo.index_status === 'FAILED'
+                      ? 'Failed'
+                      : 'Unindexed'}
                   </Badge>
                 </div>
 
@@ -211,6 +223,21 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
                       title={repo.local_path}
                     >
                       Path: {repo.local_path}
+                    </div>
+                  )}
+                  {(repo.index_error || repo.clone_error) && (
+                    <div
+                      style={{
+                        padding: '6px 8px',
+                        borderRadius: '4px',
+                        backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        color: '#f87171',
+                        fontSize: '0.725rem',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {repo.index_error || repo.clone_error}
                     </div>
                   )}
                 </div>
